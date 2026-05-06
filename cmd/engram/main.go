@@ -18,18 +18,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "--import" {
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: engram --import <export.json>")
-			os.Exit(1)
-		}
-		if err := runImport(cfg, os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "engram: import error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	st, cleanup, err := store.NewChromemStore(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram: store error: %v\n", err)

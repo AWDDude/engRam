@@ -288,30 +288,3 @@ func TestStore_Update_NotFound(t *testing.T) {
 		t.Error("expected error updating nonexistent memory, got nil")
 	}
 }
-
-func TestStore_Import(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-
-	original := Memory{
-		ID:        "imported-id-123",
-		Content:   "imported memory content",
-		Type:      "fact",
-		Tags:      []string{"imported"},
-		CreatedAt: "2025-01-01T00:00:00Z",
-	}
-	if err := s.Import(ctx, original); err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-
-	mem, err := s.GetByID(ctx, "imported-id-123")
-	if err != nil {
-		t.Fatalf("GetByID after import: %v", err)
-	}
-	if mem.CreatedAt != "2025-01-01T00:00:00Z" {
-		t.Errorf("expected original timestamp, got %q", mem.CreatedAt)
-	}
-	if mem.ID != "imported-id-123" {
-		t.Errorf("expected original ID, got %q", mem.ID)
-	}
-}

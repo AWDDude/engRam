@@ -17,16 +17,6 @@ make test     # go test -v -race ./...
 make clean    # remove binary
 ```
 
-## Migration (one-time, from LanceDB)
-
-```bash
-# 1. Export from Python server
-python3 export_lancedb.py   # writes ~/.claude/memory/export.json
-
-# 2. Import into engram (re-embeds everything with hugot)
-./engram --import ~/.claude/memory/export.json
-```
-
 ## Config
 
 Config file: `config.json` beside the binary (or `ENGRAM_CONFIG_PATH` env var).
@@ -60,7 +50,6 @@ On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downl
 ```
 cmd/engram/          # binary entry point
   main.go            # wires config → store → server
-  import.go          # --import subcommand
 
 internal/config/     # Config struct + Load/Default
 internal/store/      # Store interface, chromemStore, metaIndex, hugot embedding

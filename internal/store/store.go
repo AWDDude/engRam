@@ -39,7 +39,6 @@ type Store interface {
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id, content string) error
-	Import(ctx context.Context, m Memory) error
 }
 
 // chromemStore implements Store using chromem-go for vector search and a JSON
@@ -179,16 +178,6 @@ func (s *chromemStore) Add(ctx context.Context, content, memType string, tags []
 		return "", err
 	}
 	return id, nil
-}
-
-func (s *chromemStore) Import(ctx context.Context, m Memory) error {
-	if m.ID == "" {
-		m.ID = uuid.NewString()
-	}
-	if m.CreatedAt == "" {
-		m.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	return s.addRaw(ctx, m.ID, m.Content, m.Type, m.Tags, m.CreatedAt)
 }
 
 func (s *chromemStore) addRaw(ctx context.Context, id, content, memType string, tags []string, createdAt string) error {

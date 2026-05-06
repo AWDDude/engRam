@@ -1,3 +1,4 @@
 /engram
-db/
-config.json
+/db/
+/models/
+/config.json

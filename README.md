@@ -93,16 +93,6 @@ delete_memory(memory_id="<id>")
     └── memories/   # chromem-go vector storage (one file per document)
 ```
 
-## Migrating from a LanceDB-based server
-
-```bash
-# 1. Export your existing memories to JSON
-python3 export_lancedb.py   # writes export.json
-
-# 2. Import — re-embeds everything with hugot, preserves original IDs and timestamps
-./engram --import export.json
-```
-
 ## Development
 
 ```bash
