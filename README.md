@@ -7,7 +7,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 ## Features
 
 - **Single binary** — no Python, no Docker, no runtime dependencies
-- **Local embeddings** via [Ollama](https://ollama.com) (`nomic-embed-text` by default)
+- **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX (`all-MiniLM-L6-v2`, downloaded once on first run)
 - **Persistent vector search** via [chromem-go](https://github.com/philippgille/chromem-go) (embedded, file-based)
 - **5 MCP tools** — store, search, list, update, delete
 - **Semantic search** with optional type filtering
@@ -16,10 +16,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 ## Prerequisites
 
 - [Go 1.23+](https://go.dev/dl/)
-- [Ollama](https://ollama.com) running locally with an embedding model pulled:
-  ```bash
-  ollama pull nomic-embed-text
-  ```
+- Internet access on first run (to download the embedding model from Hugging Face — ~90MB, one-time)
 
 ## Installation
 
@@ -31,7 +28,7 @@ make install   # builds and copies to ~/.claude/mcp-servers/engram/engram
 
 Or just build:
 ```bash
-make build     # produces ./engram (static binary, ~8MB)
+make build     # produces ./engram (static binary, CGO_ENABLED=0)
 ```
 
 ## MCP configuration
@@ -52,13 +49,14 @@ engRam looks for `config.json` beside the binary. Override the path with `ENGRAM
 
 ```json
 {
-  "ollama_url":   "http://localhost:11434/api",
-  "ollama_model": "nomic-embed-text",
-  "db_path":      "/path/to/db"
+  "model_dir": "/path/to/models",
+  "db_path":   "/path/to/db"
 }
 ```
 
 All fields are optional — missing fields keep their defaults. A missing config file is not an error.
+
+On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downloaded to `model_dir`. Subsequent starts load it from disk with no network access.
 
 ## Tools
 
@@ -88,6 +86,8 @@ delete_memory(memory_id="<id>")
 <install-dir>/
 ├── engram          # the binary
 ├── config.json     # optional config override
+├── models/
+│   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
 └── db/
     ├── meta.json   # sidecar index for fast list/lookup
     └── memories/   # chromem-go vector storage (one file per document)
@@ -99,7 +99,7 @@ delete_memory(memory_id="<id>")
 # 1. Export your existing memories to JSON
 python3 export_lancedb.py   # writes export.json
 
-# 2. Import — re-embeds everything via Ollama, preserves original IDs and timestamps
+# 2. Import — re-embeds everything with hugot, preserves original IDs and timestamps
 ./engram --import export.json
 ```
 
@@ -111,7 +111,7 @@ make build   # CGO_ENABLED=0 static binary
 make clean   # remove binary
 ```
 
-Tests use an in-memory store with a deterministic mock embedding function — no Ollama required.
+Tests use an in-memory store with a deterministic mock embedding function — no model download required.
 
 ## License
 
