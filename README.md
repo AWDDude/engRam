@@ -12,6 +12,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 - **5 MCP tools** — store, search, list, update, delete
 - **Semantic search** with optional type filtering
 - **XDG-compliant** data and config paths on all platforms
+- **Model migration** — switch embedding models without losing memories
 
 ## Installation
 
@@ -75,7 +76,24 @@ The config file is optional — missing fields keep their defaults, and a missin
 }
 ```
 
-> **Warning:** changing `model.embedding_model` invalidates your existing vector database. All stored memories must be deleted and re-added after switching models, as embeddings from different models are incompatible.
+> **Warning:** changing `model.embedding_model` requires a migration — engram will refuse to start and tell you to run `engram migrate`.
+
+## Switching embedding models
+
+If you change `model.embedding_model` in your config, engram will detect the mismatch on startup and return an error:
+
+```
+engram: embedding model changed from "KnightsAnalytics/all-MiniLM-L6-v2" to "your/new-model"
+— run 'engram migrate' to re-embed all memories
+```
+
+Run the migration command to re-embed all memories with the new model:
+
+```bash
+engram migrate
+```
+
+Migration is atomic — the new collection is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
 
 ## Tools
 
