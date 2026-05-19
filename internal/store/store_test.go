@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"sync"
 	"testing"
 
 	chromem "github.com/philippgille/chromem-go"
@@ -60,7 +62,7 @@ func TestStore_AddAndGetByID(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "prefers dark mode", "user_preference", []string{"ui"})
+	id, err := s.Add(ctx, "prefers dark mode", "preference", []string{"ui"})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -72,8 +74,8 @@ func TestStore_AddAndGetByID(t *testing.T) {
 	if mem.Content != "prefers dark mode" {
 		t.Errorf("expected content 'prefers dark mode', got %q", mem.Content)
 	}
-	if mem.Type != "user_preference" {
-		t.Errorf("expected type 'user_preference', got %q", mem.Type)
+	if mem.Type != "preference" {
+		t.Errorf("expected type 'preference', got %q", mem.Type)
 	}
 	if len(mem.Tags) != 1 || mem.Tags[0] != "ui" {
 		t.Errorf("unexpected tags: %v", mem.Tags)
@@ -110,7 +112,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "David prefers the terminal over GUIs", "user_preference", nil); err != nil {
+	if _, err := s.Add(ctx, "David prefers the terminal over GUIs", "preference", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Add(ctx, "David is a Kubernetes administrator", "fact", nil); err != nil {
@@ -135,19 +137,19 @@ func TestStore_Search_TypeFilter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "prefers vim keybindings", "user_preference", nil); err != nil {
+	if _, err := s.Add(ctx, "prefers vim keybindings", "preference", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "works on AI Gateway team", "work_context", nil); err != nil {
+	if _, err := s.Add(ctx, "works on AI Gateway team", "fact", nil); err != nil {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "preferences", 5, "user_preference")
+	results, err := s.Search(ctx, "preferences", 5, "preference")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	for _, r := range results {
-		if r.Type != "user_preference" {
+		if r.Type != "preference" {
 			t.Errorf("type filter not applied: got type %q", r.Type)
 		}
 	}
@@ -160,7 +162,7 @@ func TestStore_List_All(t *testing.T) {
 	if _, err := s.Add(ctx, "memory one", "fact", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "memory two", "feedback", nil); err != nil {
+	if _, err := s.Add(ctx, "memory two", "preference", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,7 +182,7 @@ func TestStore_List_TypeFilter(t *testing.T) {
 	if _, err := s.Add(ctx, "a fact", "fact", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "a preference", "user_preference", nil); err != nil {
+	if _, err := s.Add(ctx, "a preference", "preference", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +202,7 @@ func TestStore_List_TagFilter(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "uses kubernetes", "work_context", []string{"kubernetes", "infra"}); err != nil {
+	if _, err := s.Add(ctx, "uses kubernetes", "fact", []string{"kubernetes", "infra"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Add(ctx, "prefers Go", "fact", []string{"golang"}); err != nil {
@@ -286,5 +288,81 @@ func TestStore_Update_NotFound(t *testing.T) {
 	err := s.Update(ctx, "nonexistent-id", "new content")
 	if err == nil {
 		t.Error("expected error updating nonexistent memory, got nil")
+	}
+}
+
+func TestStore_Add_TaskAndActionTypes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	taskID, err := s.Add(ctx, "refactor the auth module", "task", []string{"auth"})
+	if err != nil {
+		t.Fatalf("Add task: %v", err)
+	}
+	actionID, err := s.Add(ctx, "created PR #42 fixing login bug", "action", []string{"pr", "bugfix"})
+	if err != nil {
+		t.Fatalf("Add action: %v", err)
+	}
+
+	task, err := s.GetByID(ctx, taskID)
+	if err != nil {
+		t.Fatalf("GetByID task: %v", err)
+	}
+	if task.Type != "task" {
+		t.Errorf("expected type 'task', got %q", task.Type)
+	}
+
+	action, err := s.GetByID(ctx, actionID)
+	if err != nil {
+		t.Fatalf("GetByID action: %v", err)
+	}
+	if action.Type != "action" {
+		t.Errorf("expected type 'action', got %q", action.Type)
+	}
+}
+
+func TestStore_Search_NoLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 8; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("memory item %d", i), "fact", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := s.Search(ctx, "memory item", 0, "")
+	if err != nil {
+		t.Fatalf("Search with no limit: %v", err)
+	}
+	if len(results) != 8 {
+		t.Errorf("expected all 8 results with no limit, got %d", len(results))
+	}
+}
+
+func TestStore_ConcurrentAccess(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if _, err := s.Add(ctx, fmt.Sprintf("concurrent memory %d", i), "fact", nil); err != nil {
+				t.Errorf("concurrent Add %d failed: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	mems, err := s.List(ctx, "", "", 0)
+	if err != nil {
+		t.Fatalf("List after concurrent adds: %v", err)
+	}
+	if len(mems) != goroutines {
+		t.Errorf("expected %d memories after concurrent adds, got %d", goroutines, len(mems))
 	}
 }

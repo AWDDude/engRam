@@ -5,7 +5,16 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-var memoryTypes = []string{"user_preference", "work_context", "task", "fact", "feedback"}
+var memoryTypes = []string{"preference", "task", "fact", "action"}
+
+func validMemoryType(t string) bool {
+	for _, mt := range memoryTypes {
+		if mt == t {
+			return true
+		}
+	}
+	return false
+}
 
 // RegisterTools registers all five MCP tools on the given server.
 func RegisterTools(s *mcpserver.MCPServer, app *App) {
@@ -37,7 +46,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("The search query"),
 			),
 			mcp.WithInteger("limit",
-				mcp.Description("Maximum results to return (default 5)"),
+				mcp.Description("Maximum results to return (omit for all results)"),
 			),
 			mcp.WithString("type_filter",
 				mcp.Description("Restrict results to a specific memory type"),

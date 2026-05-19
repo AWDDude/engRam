@@ -61,6 +61,9 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 	if args.Type == "" {
 		return mcp.NewToolResultError("type is required"), nil
 	}
+	if !validMemoryType(args.Type) {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid type %q: must be one of %v", args.Type, memoryTypes)), nil
+	}
 
 	id, err := a.store.Add(ctx, args.Content, args.Type, args.Tags)
 	if err != nil {
@@ -77,12 +80,7 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if args.Query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = 5
-	}
-
-	results, err := a.store.Search(ctx, args.Query, limit, args.TypeFilter)
+	results, err := a.store.Search(ctx, args.Query, args.Limit, args.TypeFilter)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}

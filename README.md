@@ -63,17 +63,17 @@ On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downl
 | Tool | Required | Optional |
 |------|----------|----------|
 | `store_memory` | `content`, `type` | `tags` |
-| `search_memory` | `query` | `limit` (default 5), `type_filter` |
+| `search_memory` | `query` | `limit` (omit for all), `type_filter` |
 | `list_memories` | — | `type_filter`, `tag_filter`, `limit` (default 20) |
 | `delete_memory` | `memory_id` | — |
 | `update_memory` | `memory_id`, `content` | — |
 
-**Memory types:** `user_preference`, `work_context`, `task`, `fact`, `feedback`
+**Memory types:** `preference`, `task`, `fact`, `action`
 
 ### Examples
 
 ```
-store_memory(content="prefers dark mode", type="user_preference", tags=["ui"])
+store_memory(content="prefers dark mode", type="preference", tags=["ui"])
 search_memory(query="UI preferences", limit=3)
 list_memories(type_filter="fact", tag_filter="kubernetes")
 update_memory(memory_id="<id>", content="updated content")

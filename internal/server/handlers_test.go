@@ -16,6 +16,7 @@ import (
 type mockStore struct {
 	memories map[string]store.Memory
 	counter  int
+	listErr  error
 }
 
 func newMockStore() *mockStore {
@@ -44,7 +45,7 @@ func (m *mockStore) Search(_ context.Context, query string, limit int, typeFilte
 		if strings.Contains(mem.Content, query) {
 			results = append(results, store.MemoryResult{Memory: mem, Score: 0.9})
 		}
-		if len(results) >= limit {
+		if limit > 0 && len(results) >= limit {
 			break
 		}
 	}
@@ -52,6 +53,9 @@ func (m *mockStore) Search(_ context.Context, query string, limit int, typeFilte
 }
 
 func (m *mockStore) List(_ context.Context, typeFilter, tagFilter string, limit int) ([]store.Memory, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var results []store.Memory
 	for _, mem := range m.memories {
 		if typeFilter != "" && mem.Type != typeFilter {
@@ -103,11 +107,6 @@ func (m *mockStore) Update(_ context.Context, id, content string) error {
 	return nil
 }
 
-func (m *mockStore) Import(_ context.Context, mem store.Memory) error {
-	m.memories[mem.ID] = mem
-	return nil
-}
-
 // makeRequest builds a CallToolRequest with the given arguments map.
 func makeRequest(args map[string]any) mcp.CallToolRequest {
 	var req mcp.CallToolRequest
@@ -115,11 +114,13 @@ func makeRequest(args map[string]any) mcp.CallToolRequest {
 	return req
 }
 
+// --- store_memory ---
+
 func TestHandleStoreMemory_Success(t *testing.T) {
 	app := &App{store: newMockStore()}
 	req := makeRequest(map[string]any{
 		"content": "David uses a standing desk",
-		"type":    "user_preference",
+		"type":    "preference",
 		"tags":    []any{"desk", "ergonomics"},
 	})
 
@@ -130,9 +131,57 @@ func TestHandleStoreMemory_Success(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("expected success, got error: %v", result.Content)
 	}
-	text := resultText(t, result)
-	if !strings.Contains(text, "stored") {
-		t.Errorf("expected 'stored' in response, got: %s", text)
+	if !strings.Contains(resultText(t, result), "stored") {
+		t.Errorf("expected 'stored' in response, got: %s", resultText(t, result))
+	}
+}
+
+func TestHandleStoreMemory_TaskType(t *testing.T) {
+	app := &App{store: newMockStore()}
+	req := makeRequest(map[string]any{
+		"content": "refactor the auth module",
+		"type":    "task",
+	})
+
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success for task type, got error: %v", result.Content)
+	}
+}
+
+func TestHandleStoreMemory_ActionType(t *testing.T) {
+	app := &App{store: newMockStore()}
+	req := makeRequest(map[string]any{
+		"content": "created PR #42 to fix the login bug",
+		"type":    "action",
+		"tags":    []any{"pr", "bugfix"},
+	})
+
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success for action type, got error: %v", result.Content)
+	}
+}
+
+func TestHandleStoreMemory_InvalidType(t *testing.T) {
+	app := &App{store: newMockStore()}
+	req := makeRequest(map[string]any{
+		"content": "some content",
+		"type":    "work_context",
+	})
+
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected error result for invalid type")
 	}
 }
 
@@ -162,9 +211,11 @@ func TestHandleStoreMemory_MissingType(t *testing.T) {
 	}
 }
 
+// --- search_memory ---
+
 func TestHandleSearchMemory_Success(t *testing.T) {
 	ms := newMockStore()
-	ms.memories["x"] = store.Memory{ID: "x", Content: "standing desk preference", Type: "user_preference"}
+	ms.memories["x"] = store.Memory{ID: "x", Content: "standing desk preference", Type: "preference"}
 	app := &App{store: ms}
 
 	req := makeRequest(map[string]any{"query": "standing desk"})
@@ -198,7 +249,7 @@ func TestHandleSearchMemory_MissingQuery(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_DefaultLimit(t *testing.T) {
+func TestHandleSearchMemory_NoLimitReturnsAll(t *testing.T) {
 	ms := newMockStore()
 	for i := 0; i < 10; i++ {
 		ms.memories[fmt.Sprintf("id-%d", i)] = store.Memory{
@@ -218,15 +269,42 @@ func TestHandleSearchMemory_DefaultLimit(t *testing.T) {
 
 	var results []store.MemoryResult
 	json.Unmarshal([]byte(resultText(t, result)), &results) //nolint:errcheck
-	if len(results) > 5 {
-		t.Errorf("default limit should be 5, got %d results", len(results))
+	if len(results) != 10 {
+		t.Errorf("expected all 10 results with no limit, got %d", len(results))
 	}
 }
+
+func TestHandleSearchMemory_WithLimit(t *testing.T) {
+	ms := newMockStore()
+	for i := 0; i < 10; i++ {
+		ms.memories[fmt.Sprintf("id-%d", i)] = store.Memory{
+			ID: fmt.Sprintf("id-%d", i), Content: "item", Type: "fact",
+		}
+	}
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{"query": "item", "limit": 3})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var results []store.MemoryResult
+	json.Unmarshal([]byte(resultText(t, result)), &results) //nolint:errcheck
+	if len(results) != 3 {
+		t.Errorf("expected 3 results with limit=3, got %d", len(results))
+	}
+}
+
+// --- list_memories ---
 
 func TestHandleListMemories_ReturnsAll(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Content: "one", Type: "fact"}
-	ms.memories["b"] = store.Memory{ID: "b", Content: "two", Type: "feedback"}
+	ms.memories["b"] = store.Memory{ID: "b", Content: "two", Type: "preference"}
 	app := &App{store: ms}
 
 	req := makeRequest(map[string]any{})
@@ -246,6 +324,72 @@ func TestHandleListMemories_ReturnsAll(t *testing.T) {
 		t.Errorf("expected 2 memories, got %d", len(mems))
 	}
 }
+
+func TestHandleListMemories_TypeFilter(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Content: "a fact", Type: "fact"}
+	ms.memories["b"] = store.Memory{ID: "b", Content: "an action", Type: "action"}
+	ms.memories["c"] = store.Memory{ID: "c", Content: "a task", Type: "task"}
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{"type_filter": "action"})
+	result, err := app.handleListMemories(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var mems []store.Memory
+	if err := json.Unmarshal([]byte(resultText(t, result)), &mems); err != nil {
+		t.Fatalf("parsing list result: %v", err)
+	}
+	if len(mems) != 1 || mems[0].Type != "action" {
+		t.Errorf("expected 1 action memory, got %d (%v)", len(mems), mems)
+	}
+}
+
+func TestHandleListMemories_TagFilter(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Content: "kubernetes fact", Type: "fact", Tags: []string{"kubernetes", "infra"}}
+	ms.memories["b"] = store.Memory{ID: "b", Content: "go preference", Type: "preference", Tags: []string{"golang"}}
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{"tag_filter": "kubernetes"})
+	result, err := app.handleListMemories(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var mems []store.Memory
+	if err := json.Unmarshal([]byte(resultText(t, result)), &mems); err != nil {
+		t.Fatalf("parsing list result: %v", err)
+	}
+	if len(mems) != 1 || mems[0].ID != "a" {
+		t.Errorf("expected 1 kubernetes memory, got %d", len(mems))
+	}
+}
+
+func TestHandleListMemories_StoreError(t *testing.T) {
+	ms := newMockStore()
+	ms.listErr = fmt.Errorf("disk failure")
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{})
+	result, err := app.handleListMemories(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error result when store returns error")
+	}
+}
+
+// --- delete_memory ---
 
 func TestHandleDeleteMemory_Success(t *testing.T) {
 	ms := newMockStore()
@@ -277,6 +421,8 @@ func TestHandleDeleteMemory_MissingID(t *testing.T) {
 		t.Error("expected error result for missing memory_id")
 	}
 }
+
+// --- update_memory ---
 
 func TestHandleUpdateMemory_Success(t *testing.T) {
 	ms := newMockStore()

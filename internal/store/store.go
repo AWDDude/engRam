@@ -207,7 +207,7 @@ func (s *chromemStore) Search(ctx context.Context, query string, limit int, type
 	if count == 0 {
 		return []MemoryResult{}, nil
 	}
-	if limit > count {
+	if limit <= 0 || limit > count {
 		limit = count
 	}
 
