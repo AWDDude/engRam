@@ -30,6 +30,21 @@ archives:
 checksum:
   name_template: checksums.txt
 
+brews:
+  - name: engram
+    homepage: https://github.com/AWDDude/engRam
+    description: MCP server for long-term semantic memory
+    repository:
+      owner: AWDDude
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    directory: Formula
+    install: bin.install "engram"
+    skip_upload: auto
+
 changelog:
   sort: asc
   filters:
