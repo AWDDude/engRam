@@ -12,14 +12,16 @@ MCP server for long-term semantic memory. Single statically-linked Go binary.
 
 ```bash
 make build    # CGO_ENABLED=0 static binary → ./engram
-make install  # build + copy to ~/.claude/mcp-servers/engram/engram
 make test     # go test -v -race ./...
 make clean    # remove binary
 ```
 
 ## Config
 
-Config file: `config.json` beside the binary (or `ENGRAM_CONFIG_PATH` env var).
+Config file location (or override with `ENGRAM_CONFIG_PATH`):
+- macOS: `~/Library/Application Support/engram/config.json`
+- Linux: `~/.config/engram/config.json`
+- `XDG_CONFIG_HOME` honored on all platforms
 
 ```json
 {
@@ -35,9 +37,8 @@ On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downl
 ## Data layout
 
 ```
-<install-dir>/
-├── engram          # the binary
-├── config.json     # optional config override
+~/Library/Application Support/engram/   # macOS (~/.local/share/engram on Linux)
+├── config.json                         # optional config override
 ├── models/
 │   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
 └── db/

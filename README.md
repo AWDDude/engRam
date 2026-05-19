@@ -7,45 +7,61 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 ## Features
 
 - **Single binary** — no Python, no Docker, no runtime dependencies
-- **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX (`all-MiniLM-L6-v2`, downloaded once on first run)
+- **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX ([all-MiniLM-L6-v2](https://huggingface.co/KnightsAnalytics/all-MiniLM-L6-v2), Apache 2.0, downloaded once on first run)
 - **Persistent vector search** via [chromem-go](https://github.com/philippgille/chromem-go) (embedded, file-based)
 - **5 MCP tools** — store, search, list, update, delete
 - **Semantic search** with optional type filtering
-- **Config file** support with sane defaults
-
-## Prerequisites
-
-- [Go 1.23+](https://go.dev/dl/)
-- Internet access on first run (to download the embedding model from Hugging Face — ~90MB, one-time)
+- **XDG-compliant** data and config paths on all platforms
 
 ## Installation
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install AWDDude/tap/engram
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/AWDDude/engRam.git
 cd engRam
-make install   # builds and copies to ~/.claude/mcp-servers/engram/engram
-```
-
-Or just build:
-```bash
 make build     # produces ./engram (static binary, CGO_ENABLED=0)
 ```
 
+Then copy the binary somewhere on your PATH, e.g. `~/.local/bin/`.
+
+> Internet access is required on first run to download the embedding model from Hugging Face (~90MB, one-time only).
+
 ## MCP configuration
 
-Add to your Claude MCP config (e.g. `~/.claude/.mcp.json`):
+Add to `~/.claude/settings.json`:
 
 ```json
 {
-  "engram": {
-    "command": "/path/to/engram"
+  "mcpServers": {
+    "engram": {
+      "command": "engram"
+    }
   }
 }
 ```
 
+If you built from source or installed to a custom path, use the full path to the binary instead.
+
 ## Configuration
 
-engRam looks for `config.json` beside the binary. Override the path with `ENGRAM_CONFIG_PATH`.
+engRam stores data in platform-appropriate directories by default:
+
+| Platform | Data (db, models) | Config |
+|----------|-------------------|--------|
+| macOS | `~/Library/Application Support/engram/` | `~/Library/Application Support/engram/config.json` |
+| Linux | `~/.local/share/engram/` | `~/.config/engram/config.json` |
+| Windows | `%APPDATA%\engram\` | `%APPDATA%\engram\config.json` |
+
+`XDG_DATA_HOME` and `XDG_CONFIG_HOME` are honored on all platforms. Override the config path entirely with `ENGRAM_CONFIG_PATH`.
+
+The config file is optional — missing fields keep their defaults, and a missing file is not an error:
 
 ```json
 {
@@ -53,10 +69,6 @@ engRam looks for `config.json` beside the binary. Override the path with `ENGRAM
   "db_path":   "/path/to/db"
 }
 ```
-
-All fields are optional — missing fields keep their defaults. A missing config file is not an error.
-
-On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downloaded to `model_dir`. Subsequent starts load it from disk with no network access.
 
 ## Tools
 
@@ -80,19 +92,6 @@ update_memory(memory_id="<id>", content="updated content")
 delete_memory(memory_id="<id>")
 ```
 
-## Data layout
-
-```
-<install-dir>/
-├── engram          # the binary
-├── config.json     # optional config override
-├── models/
-│   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
-└── db/
-    ├── meta.json   # sidecar index for fast list/lookup
-    └── memories/   # chromem-go vector storage (one file per document)
-```
-
 ## Development
 
 ```bash
@@ -105,4 +104,4 @@ Tests use an in-memory store with a deterministic mock embedding function — no
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
