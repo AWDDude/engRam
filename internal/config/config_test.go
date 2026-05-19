@@ -9,11 +9,14 @@ import (
 
 func TestDefault(t *testing.T) {
 	cfg := Default()
-	if cfg.ModelDir == "" {
-		t.Error("expected non-empty default ModelDir")
+	if cfg.Model.Path == "" {
+		t.Error("expected non-empty default Model.Path")
 	}
-	if cfg.DBPath == "" {
-		t.Error("expected non-empty default DBPath")
+	if cfg.Model.EmbeddingModel == "" {
+		t.Error("expected non-empty default Model.EmbeddingModel")
+	}
+	if cfg.DB.Path == "" {
+		t.Error("expected non-empty default DB.Path")
 	}
 }
 
@@ -23,17 +26,17 @@ func TestLoad_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing config file, got %v", err)
 	}
-	if cfg.ModelDir == "" {
-		t.Error("expected non-empty default ModelDir")
+	if cfg.Model.Path == "" {
+		t.Error("expected non-empty default Model.Path")
 	}
 }
 
 func TestLoad_FromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data, _ := json.Marshal(Config{
-		ModelDir: "/custom/models",
-		DBPath:   "/custom/db",
+	data, _ := json.Marshal(map[string]any{
+		"model": map[string]string{"path": "/custom/models", "embedding_model": "custom/model"},
+		"db":    map[string]string{"path": "/custom/db"},
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -44,11 +47,14 @@ func TestLoad_FromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.ModelDir != "/custom/models" {
-		t.Errorf("expected custom model dir, got %s", cfg.ModelDir)
+	if cfg.Model.Path != "/custom/models" {
+		t.Errorf("expected custom model path, got %s", cfg.Model.Path)
 	}
-	if cfg.DBPath != "/custom/db" {
-		t.Errorf("expected custom db path, got %s", cfg.DBPath)
+	if cfg.Model.EmbeddingModel != "custom/model" {
+		t.Errorf("expected custom embedding model, got %s", cfg.Model.EmbeddingModel)
+	}
+	if cfg.DB.Path != "/custom/db" {
+		t.Errorf("expected custom db path, got %s", cfg.DB.Path)
 	}
 }
 
@@ -69,7 +75,9 @@ func TestLoad_InvalidJSON(t *testing.T) {
 func TestLoad_PartialOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data, _ := json.Marshal(map[string]string{"model_dir": "/custom/models"})
+	data, _ := json.Marshal(map[string]any{
+		"model": map[string]string{"path": "/custom/models"},
+	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +87,13 @@ func TestLoad_PartialOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.ModelDir != "/custom/models" {
-		t.Errorf("expected custom model dir, got %s", cfg.ModelDir)
+	if cfg.Model.Path != "/custom/models" {
+		t.Errorf("expected custom model path, got %s", cfg.Model.Path)
 	}
-	if cfg.DBPath == "" {
-		t.Error("DBPath should keep its default when not overridden")
+	if cfg.Model.EmbeddingModel == "" {
+		t.Error("EmbeddingModel should keep its default when not overridden")
+	}
+	if cfg.DB.Path == "" {
+		t.Error("DB.Path should keep its default when db section is omitted")
 	}
 }

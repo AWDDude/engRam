@@ -25,10 +25,17 @@ Config file location (or override with `ENGRAM_CONFIG_PATH`):
 
 ```json
 {
-  "model_dir": "/path/to/models",
-  "db_path":   "/path/to/db"
+  "model": {
+    "path": "/path/to/models",
+    "embedding_model": "KnightsAnalytics/all-MiniLM-L6-v2"
+  },
+  "db": {
+    "path": "/path/to/db"
+  }
 }
 ```
+
+**Warning:** changing `model.embedding_model` invalidates the vector database — all memories must be deleted and re-added.
 
 Missing config file → all defaults apply. Partial config → unset fields keep defaults.
 

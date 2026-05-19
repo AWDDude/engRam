@@ -8,10 +8,23 @@ import (
 	"runtime"
 )
 
+// ModelConfig holds model-related configuration.
+type ModelConfig struct {
+	Path string `json:"path"`
+	// WARNING: changing EmbeddingModel invalidates the existing vector database.
+	// All stored memories must be deleted and re-added after switching models.
+	EmbeddingModel string `json:"embedding_model"`
+}
+
+// DBConfig holds database-related configuration.
+type DBConfig struct {
+	Path string `json:"path"`
+}
+
 // Config holds all runtime configuration for engram.
 type Config struct {
-	ModelDir string `json:"model_dir"`
-	DBPath   string `json:"db_path"`
+	Model ModelConfig `json:"model"`
+	DB    DBConfig    `json:"db"`
 }
 
 // dataDir returns the platform-appropriate user data directory for engram.
@@ -46,8 +59,13 @@ func Default() Config {
 		base = filepath.Join(home, ".engram")
 	}
 	return Config{
-		ModelDir: filepath.Join(base, "models"),
-		DBPath:   filepath.Join(base, "db"),
+		Model: ModelConfig{
+			Path:           filepath.Join(base, "models"),
+			EmbeddingModel: "KnightsAnalytics/all-MiniLM-L6-v2",
+		},
+		DB: DBConfig{
+			Path: filepath.Join(base, "db"),
+		},
 	}
 }
 
@@ -97,8 +115,21 @@ func Load() (Config, error) {
 		return cfg, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	// Split into raw sections first, then unmarshal each into the already-defaulted
+	// sub-struct so that omitted fields within a section keep their defaults.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return cfg, fmt.Errorf("parsing config %s: %w", configPath, err)
+	}
+	if v, ok := raw["model"]; ok {
+		if err := json.Unmarshal(v, &cfg.Model); err != nil {
+			return cfg, fmt.Errorf("parsing config model section: %w", err)
+		}
+	}
+	if v, ok := raw["db"]; ok {
+		if err := json.Unmarshal(v, &cfg.DB); err != nil {
+			return cfg, fmt.Errorf("parsing config db section: %w", err)
+		}
 	}
 	return cfg, nil
 }

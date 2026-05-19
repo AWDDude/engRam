@@ -9,23 +9,21 @@ import (
 	chromem "github.com/philippgille/chromem-go"
 )
 
-const embeddingModel = "KnightsAnalytics/all-MiniLM-L6-v2"
-
 // newEmbeddingFunc creates a chromem-compatible embedding function backed by
 // hugot's pure-Go (GoMLX simplego) session. The model is downloaded once to
 // modelDir on first run and reused on subsequent starts.
 // The returned cleanup func must be called when the process exits.
-func newEmbeddingFunc(ctx context.Context, modelDir string) (chromem.EmbeddingFunc, func(), error) {
+func newEmbeddingFunc(ctx context.Context, modelDir, model string) (chromem.EmbeddingFunc, func(), error) {
 	session, err := hugot.NewGoSession(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating embedding session: %w", err)
 	}
 	cleanup := func() { _ = session.Destroy() }
 
-	modelPath, err := hugot.DownloadModel(ctx, embeddingModel, modelDir, hugot.NewDownloadOptions())
+	modelPath, err := hugot.DownloadModel(ctx, model, modelDir, hugot.NewDownloadOptions())
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("downloading model %s: %w", embeddingModel, err)
+		return nil, nil, fmt.Errorf("downloading model %s: %w", model, err)
 	}
 
 	pipeline, err := hugot.NewPipeline(session, hugot.FeatureExtractionConfig{

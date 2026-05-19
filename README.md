@@ -65,10 +65,17 @@ The config file is optional — missing fields keep their defaults, and a missin
 
 ```json
 {
-  "model_dir": "/path/to/models",
-  "db_path":   "/path/to/db"
+  "model": {
+    "path": "/path/to/models",
+    "embedding_model": "KnightsAnalytics/all-MiniLM-L6-v2"
+  },
+  "db": {
+    "path": "/path/to/db"
+  }
 }
 ```
+
+> **Warning:** changing `model.embedding_model` invalidates your existing vector database. All stored memories must be deleted and re-added after switching models, as embeddings from different models are incompatible.
 
 ## Tools
 
