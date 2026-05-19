@@ -12,6 +12,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate()
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram: config error: %v\n", err)
@@ -20,7 +25,7 @@ func main() {
 
 	st, cleanup, err := store.NewChromemStore(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "engram: store error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "engram: %v\n", err)
 		os.Exit(1)
 	}
 	defer cleanup()

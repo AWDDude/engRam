@@ -36,7 +36,10 @@ func testEmbedFunc(_ context.Context, text string) ([]float32, error) {
 func newTestStore(t *testing.T) Store {
 	t.Helper()
 	s, err := newChromemStoreWithEmb(
-		config.Config{DBPath: t.TempDir()},
+		config.Config{
+			DB:    config.DBConfig{Path: t.TempDir()},
+			Model: config.ModelConfig{EmbeddingModel: "test-model"},
+		},
 		chromem.EmbeddingFunc(testEmbedFunc),
 	)
 	if err != nil {

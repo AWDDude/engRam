@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,42 @@ func TestLoad_InvalidJSON(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestDefault_XDGDataHome(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/custom/xdg/data")
+	cfg := Default()
+	if !strings.HasPrefix(cfg.Model.Path, "/custom/xdg/data") {
+		t.Errorf("XDG_DATA_HOME not honored for model path, got: %s", cfg.Model.Path)
+	}
+	if !strings.HasPrefix(cfg.DB.Path, "/custom/xdg/data") {
+		t.Errorf("XDG_DATA_HOME not honored for db path, got: %s", cfg.DB.Path)
+	}
+}
+
+func TestLoad_XDGConfigHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("ENGRAM_CONFIG_PATH", "")
+
+	cfgDir := filepath.Join(dir, "engram")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{
+		"model": map[string]string{"path": "/xdg/config/models"},
+	})
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Model.Path != "/xdg/config/models" {
+		t.Errorf("XDG_CONFIG_HOME not honored for config lookup, got model path: %s", cfg.Model.Path)
 	}
 }
 

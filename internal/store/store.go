@@ -133,7 +133,25 @@ func (m *metaIndex) list(typeFilter, tagFilter string, limit int) []Memory {
 
 // NewChromemStore creates a production store backed by hugot (GoMLX) for embeddings.
 // The second return value is a cleanup func that must be called when the process exits.
+// Returns ModelChangedError if the configured model differs from the one used to build
+// the existing database — run 'engram migrate' to resolve.
 func NewChromemStore(cfg config.Config) (Store, func(), error) {
+	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
+		return nil, nil, fmt.Errorf("creating db dir: %w", err)
+	}
+
+	meta, err := loadDBMeta(cfg.DB.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if meta.ActiveModel == "" {
+		if err := saveDBMeta(cfg.DB.Path, dbMeta{ActiveModel: cfg.Model.EmbeddingModel}); err != nil {
+			return nil, nil, fmt.Errorf("writing db meta: %w", err)
+		}
+	} else if meta.ActiveModel != cfg.Model.EmbeddingModel {
+		return nil, nil, &ModelChangedError{OldModel: meta.ActiveModel, NewModel: cfg.Model.EmbeddingModel}
+	}
+
 	embFn, cleanup, err := newEmbeddingFunc(context.Background(), cfg.Model.Path, cfg.Model.EmbeddingModel)
 	if err != nil {
 		return nil, nil, err
@@ -149,11 +167,12 @@ func NewChromemStore(cfg config.Config) (Store, func(), error) {
 // newChromemStoreWithEmb creates a store with an injectable embedding function.
 // Exists to allow tests to inject a mock without requiring a live model.
 func newChromemStoreWithEmb(cfg config.Config, embFn chromem.EmbeddingFunc) (Store, error) {
-	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
-		return nil, fmt.Errorf("creating db dir: %w", err)
+	collPath := modelCollectionPath(cfg.DB.Path, cfg.Model.EmbeddingModel)
+	if err := os.MkdirAll(collPath, 0700); err != nil {
+		return nil, fmt.Errorf("creating collection dir: %w", err)
 	}
 
-	db, err := chromem.NewPersistentDB(cfg.DB.Path, false)
+	db, err := chromem.NewPersistentDB(collPath, false)
 	if err != nil {
 		return nil, fmt.Errorf("opening db: %w", err)
 	}
@@ -163,7 +182,7 @@ func newChromemStoreWithEmb(cfg config.Config, embFn chromem.EmbeddingFunc) (Sto
 		return nil, fmt.Errorf("creating collection: %w", err)
 	}
 
-	meta, err := newMetaIndex(filepath.Join(cfg.DB.Path, "meta.json"))
+	meta, err := newMetaIndex(filepath.Join(collPath, "meta.json"))
 	if err != nil {
 		return nil, fmt.Errorf("loading meta index: %w", err)
 	}
