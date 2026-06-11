@@ -98,22 +98,22 @@ Migration is atomic — the new collection is fully built before the old one is 
 
 | Tool | Required | Optional |
 |------|----------|----------|
-| `store_memory` | `content`, `type` | `tags` |
-| `search_memory` | `query` | `limit` (omit for all), `type_filter` |
-| `list_memories` | — | `type_filter`, `tag_filter`, `limit` (default 20) |
-| `delete_memory` | `memory_id` | — |
-| `update_memory` | `memory_id`, `content` | — |
+| `store` | `content`, `type` | `tags` |
+| `search` | `query` | `limit` (omit for all), `type_filter` |
+| `list` | — | `type_filter`, `tag_filter`, `limit` (default 20) |
+| `delete` | `memory_id` | — |
+| `update` | `memory_id`, `content` | — |
 
 **Memory types:** `preference`, `task`, `fact`, `action`
 
 ### Examples
 
 ```
-store_memory(content="prefers dark mode", type="preference", tags=["ui"])
-search_memory(query="UI preferences", limit=3)
-list_memories(type_filter="fact", tag_filter="kubernetes")
-update_memory(memory_id="<id>", content="updated content")
-delete_memory(memory_id="<id>")
+store(content="prefers dark mode", type="preference", tags=["ui"])
+search(query="UI preferences", limit=3)
+list(type_filter="fact", tag_filter="kubernetes")
+update(memory_id="<id>", content="updated content")
+delete(memory_id="<id>")
 ```
 
 ## Development

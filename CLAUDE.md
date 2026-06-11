@@ -72,8 +72,8 @@ internal/server/     # App + MCP handlers + RegisterTools
 
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
-| `store_memory` | content, type | tags |
-| `search_memory` | query | limit (5), type_filter |
-| `list_memories` | — | type_filter, tag_filter, limit (20) |
-| `delete_memory` | memory_id | — |
-| `update_memory` | memory_id, content | — |
+| `store` | content, type | tags |
+| `search` | query | limit (5), type_filter |
+| `list` | — | type_filter, tag_filter, limit (20) |
+| `delete` | memory_id | — |
+| `update` | memory_id, content | — |

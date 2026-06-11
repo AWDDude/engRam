@@ -114,7 +114,7 @@ func makeRequest(args map[string]any) mcp.CallToolRequest {
 	return req
 }
 
-// --- store_memory ---
+// --- store ---
 
 func TestHandleStoreMemory_Success(t *testing.T) {
 	app := &App{store: newMockStore()}
@@ -211,7 +211,7 @@ func TestHandleStoreMemory_MissingType(t *testing.T) {
 	}
 }
 
-// --- search_memory ---
+// --- search ---
 
 func TestHandleSearchMemory_Success(t *testing.T) {
 	ms := newMockStore()
@@ -299,7 +299,7 @@ func TestHandleSearchMemory_WithLimit(t *testing.T) {
 	}
 }
 
-// --- list_memories ---
+// --- list ---
 
 func TestHandleListMemories_ReturnsAll(t *testing.T) {
 	ms := newMockStore()
@@ -389,7 +389,7 @@ func TestHandleListMemories_StoreError(t *testing.T) {
 	}
 }
 
-// --- delete_memory ---
+// --- delete ---
 
 func TestHandleDeleteMemory_Success(t *testing.T) {
 	ms := newMockStore()
@@ -422,7 +422,7 @@ func TestHandleDeleteMemory_MissingID(t *testing.T) {
 	}
 }
 
-// --- update_memory ---
+// --- update ---
 
 func TestHandleUpdateMemory_Success(t *testing.T) {
 	ms := newMockStore()

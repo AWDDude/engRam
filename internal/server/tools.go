@@ -19,7 +19,7 @@ func validMemoryType(t string) bool {
 // RegisterTools registers all five MCP tools on the given server.
 func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	s.AddTool(
-		mcp.NewTool("store_memory",
+		mcp.NewTool("store",
 			mcp.WithDescription("Store a new memory in engram"),
 			mcp.WithString("content",
 				mcp.Required(),
@@ -39,7 +39,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	)
 
 	s.AddTool(
-		mcp.NewTool("search_memory",
+		mcp.NewTool("search",
 			mcp.WithDescription("Semantically search stored memories using vector similarity"),
 			mcp.WithString("query",
 				mcp.Required(),
@@ -57,7 +57,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	)
 
 	s.AddTool(
-		mcp.NewTool("list_memories",
+		mcp.NewTool("list",
 			mcp.WithDescription("List stored memories with optional type and tag filtering"),
 			mcp.WithString("type_filter",
 				mcp.Description("Filter by memory type"),
@@ -74,7 +74,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	)
 
 	s.AddTool(
-		mcp.NewTool("delete_memory",
+		mcp.NewTool("delete",
 			mcp.WithDescription("Delete a memory by ID"),
 			mcp.WithString("memory_id",
 				mcp.Required(),
@@ -85,7 +85,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	)
 
 	s.AddTool(
-		mcp.NewTool("update_memory",
+		mcp.NewTool("update",
 			mcp.WithDescription("Update the content of an existing memory and re-embed it"),
 			mcp.WithString("memory_id",
 				mcp.Required(),
