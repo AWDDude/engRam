@@ -52,17 +52,16 @@ If you built from source or installed to a custom path, use the full path to the
 
 ## Configuration
 
-engRam stores data in platform-appropriate directories by default:
+engRam uses XDG-style directories by default on all platforms:
 
-| Platform | Data (db, models) | Config |
-|----------|-------------------|--------|
-| macOS | `~/Library/Application Support/engram/` | `~/Library/Application Support/engram/config.json` |
-| Linux | `~/.local/share/engram/` | `~/.config/engram/config.json` |
-| Windows | `%APPDATA%\engram\` | `%APPDATA%\engram\config.json` |
+| Purpose | Default path |
+|---------|-------------|
+| Data (db, models) | `~/.local/share/engram/` |
+| Config | `~/.config/engram/config.json` |
 
 `XDG_DATA_HOME` and `XDG_CONFIG_HOME` are honored on all platforms. Override the config path entirely with `ENGRAM_CONFIG_PATH`.
 
-The config file is optional — missing fields keep their defaults, and a missing file is not an error:
+If the config file does not exist, engram creates it with defaults on first run. All fields are required — engram will log any missing fields and exit if the file is incomplete.
 
 ```json
 {

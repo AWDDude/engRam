@@ -19,9 +19,8 @@ make clean    # remove binary
 ## Config
 
 Config file location (or override with `ENGRAM_CONFIG_PATH`):
-- macOS: `~/Library/Application Support/engram/config.json`
-- Linux: `~/.config/engram/config.json`
-- `XDG_CONFIG_HOME` honored on all platforms
+- All platforms: `~/.config/engram/config.json`
+- `XDG_CONFIG_HOME` honored on all platforms (e.g. `$XDG_CONFIG_HOME/engram/config.json`)
 
 ```json
 {
@@ -37,15 +36,14 @@ Config file location (or override with `ENGRAM_CONFIG_PATH`):
 
 **Warning:** changing `model.embedding_model` invalidates the vector database — all memories must be deleted and re-added.
 
-Missing config file → all defaults apply. Partial config → unset fields keep defaults.
+Missing config file → created with defaults on first run. Partial/incomplete config → logs missing fields and exits.
 
 On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downloaded from Hugging Face to `model_dir`. Subsequent starts load it from disk with no network access.
 
 ## Data layout
 
 ```
-~/Library/Application Support/engram/   # macOS (~/.local/share/engram on Linux)
-├── config.json                         # optional config override
+~/.local/share/engram/   # all platforms ($XDG_DATA_HOME/engram if set)
 ├── models/
 │   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
 └── db/

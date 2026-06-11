@@ -21,14 +21,53 @@ func TestDefault(t *testing.T) {
 	}
 }
 
-func TestLoad_MissingFile(t *testing.T) {
-	t.Setenv("ENGRAM_CONFIG_PATH", "/nonexistent/path/config.json")
+func TestLoad_AutoCreate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("ENGRAM_CONFIG_PATH", "")
+
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("expected no error for missing config file, got %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.Model.Path == "" {
 		t.Error("expected non-empty default Model.Path")
+	}
+
+	createdPath := filepath.Join(dir, "engram", "config.json")
+	data, err := os.ReadFile(createdPath)
+	if err != nil {
+		t.Fatalf("expected config file to be created at %s: %v", createdPath, err)
+	}
+	var written Config
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("created config is not valid JSON: %v", err)
+	}
+	if written.Model.EmbeddingModel != cfg.Model.EmbeddingModel {
+		t.Errorf("written embedding model %q does not match default %q", written.Model.EmbeddingModel, cfg.Model.EmbeddingModel)
+	}
+}
+
+func TestLoad_AutoCreate_ViaEnvPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom", "config.json")
+	t.Setenv("ENGRAM_CONFIG_PATH", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected config file to be created at %s: %v", path, err)
+	}
+	var written Config
+	if err := json.Unmarshal(data, &written); err != nil {
+		t.Fatalf("created config is not valid JSON: %v", err)
+	}
+	if written.Model.EmbeddingModel != cfg.Model.EmbeddingModel {
+		t.Errorf("written embedding model %q does not match default %q", written.Model.EmbeddingModel, cfg.Model.EmbeddingModel)
 	}
 }
 
@@ -94,7 +133,8 @@ func TestLoad_XDGConfigHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := json.Marshal(map[string]any{
-		"model": map[string]string{"path": "/xdg/config/models"},
+		"model": map[string]string{"path": "/xdg/config/models", "embedding_model": "custom/model"},
+		"db":    map[string]string{"path": "/xdg/config/db"},
 	})
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), data, 0600); err != nil {
 		t.Fatal(err)
@@ -109,7 +149,7 @@ func TestLoad_XDGConfigHome(t *testing.T) {
 	}
 }
 
-func TestLoad_PartialOverride(t *testing.T) {
+func TestLoad_MissingFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	data, _ := json.Marshal(map[string]any{
@@ -120,17 +160,13 @@ func TestLoad_PartialOverride(t *testing.T) {
 	}
 	t.Setenv("ENGRAM_CONFIG_PATH", path)
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing fields, got nil")
 	}
-	if cfg.Model.Path != "/custom/models" {
-		t.Errorf("expected custom model path, got %s", cfg.Model.Path)
-	}
-	if cfg.Model.EmbeddingModel == "" {
-		t.Error("EmbeddingModel should keep its default when not overridden")
-	}
-	if cfg.DB.Path == "" {
-		t.Error("DB.Path should keep its default when db section is omitted")
+	for _, field := range []string{"model.embedding_model", "db.path"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("expected error to mention %q, got: %v", field, err)
+		}
 	}
 }

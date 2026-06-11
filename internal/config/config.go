@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 )
 
 // ModelConfig holds model-related configuration.
@@ -27,27 +27,17 @@ type Config struct {
 	DB    DBConfig    `json:"db"`
 }
 
-// dataDir returns the platform-appropriate user data directory for engram.
-// XDG_DATA_HOME is honored on any platform if set.
-// Linux fallback: ~/.local/share/engram
-// macOS fallback: ~/Library/Application Support/engram
-// Windows fallback: %APPDATA%\engram
+// dataDir returns the user data directory for engram.
+// XDG_DATA_HOME is honored if set; otherwise defaults to ~/.local/share/engram on all platforms.
 func dataDir() (string, error) {
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "engram"), nil
 	}
-	if runtime.GOOS == "linux" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, ".local", "share", "engram"), nil
-	}
-	dir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "engram"), nil
+	return filepath.Join(home, ".local", "share", "engram"), nil
 }
 
 // Default returns configuration with platform-appropriate data directory
@@ -69,31 +59,35 @@ func Default() Config {
 	}
 }
 
-// configDir returns the platform-appropriate user config directory for engram.
-// XDG_CONFIG_HOME is honored on any platform if set.
-// Linux fallback: ~/.config/engram
-// macOS fallback: ~/Library/Application Support/engram
-// Windows fallback: %APPDATA%\engram
+// configDir returns the user config directory for engram.
+// XDG_CONFIG_HOME is honored if set; otherwise defaults to ~/.config/engram on all platforms.
 func configDir() (string, error) {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "engram"), nil
 	}
-	if runtime.GOOS == "linux" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, ".config", "engram"), nil
-	}
-	dir, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "engram"), nil
+	return filepath.Join(home, ".config", "engram"), nil
+}
+
+// writeDefault marshals cfg as indented JSON and writes it to path,
+// creating any parent directories as needed.
+func writeDefault(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
 // Load reads config from ENGRAM_CONFIG_PATH, falling back to config.json in
-// the platform config directory. A missing file is not an error — defaults apply.
+// the platform config directory. If the file does not exist it is created with
+// default values. ENGRAM_CONFIG_PATH skips auto-creation.
 func Load() (Config, error) {
 	cfg := Default()
 
@@ -109,27 +103,32 @@ func Load() (Config, error) {
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
+		if err := writeDefault(configPath, cfg); err != nil {
+			return cfg, fmt.Errorf("creating default config %s: %w", configPath, err)
+		}
 		return cfg, nil
 	}
 	if err != nil {
 		return cfg, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
-	// Split into raw sections first, then unmarshal each into the already-defaulted
-	// sub-struct so that omitted fields within a section keep their defaults.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return cfg, fmt.Errorf("parsing config %s: %w", configPath, err)
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return Config{}, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
-	if v, ok := raw["model"]; ok {
-		if err := json.Unmarshal(v, &cfg.Model); err != nil {
-			return cfg, fmt.Errorf("parsing config model section: %w", err)
-		}
+
+	var missing []string
+	if parsed.Model.Path == "" {
+		missing = append(missing, "model.path")
 	}
-	if v, ok := raw["db"]; ok {
-		if err := json.Unmarshal(v, &cfg.DB); err != nil {
-			return cfg, fmt.Errorf("parsing config db section: %w", err)
-		}
+	if parsed.Model.EmbeddingModel == "" {
+		missing = append(missing, "model.embedding_model")
 	}
-	return cfg, nil
+	if parsed.DB.Path == "" {
+		missing = append(missing, "db.path")
+	}
+	if len(missing) > 0 {
+		return Config{}, fmt.Errorf("config %s missing required fields: %s", configPath, strings.Join(missing, ", "))
+	}
+	return parsed, nil
 }
