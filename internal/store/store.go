@@ -16,6 +16,15 @@ import (
 	"github.com/AWDDude/engRam/internal/config"
 )
 
+const (
+	// chunkSizeWords is the max words per chunk (~200 tokens, safely below the
+	// 256-token limit of all-MiniLM-L6-v2 after accounting for special tokens).
+	chunkSizeWords = 200
+	// chunkOverlapWords is the number of words shared between adjacent chunks
+	// to preserve context at boundaries.
+	chunkOverlapWords = 30
+)
+
 // Memory is the internal representation of a stored memory.
 type Memory struct {
 	ID        string   `json:"id"`
@@ -131,6 +140,28 @@ func (m *metaIndex) list(typeFilter, tagFilter string, limit int) []Memory {
 	return results
 }
 
+// chunkText splits text into overlapping word-based chunks. Returns a
+// single-element slice when text fits within chunkSizeWords.
+func chunkText(text string) []string {
+	words := strings.Fields(text)
+	if len(words) <= chunkSizeWords {
+		return []string{text}
+	}
+	stride := chunkSizeWords - chunkOverlapWords
+	var chunks []string
+	for start := 0; start < len(words); start += stride {
+		end := start + chunkSizeWords
+		if end > len(words) {
+			end = len(words)
+		}
+		chunks = append(chunks, strings.Join(words[start:end], " "))
+		if end == len(words) {
+			break
+		}
+	}
+	return chunks
+}
+
 // NewChromemStore creates a production store backed by hugot (GoMLX) for embeddings.
 // The second return value is a cleanup func that must be called when the process exits.
 // Returns ModelChangedError if the configured model differs from the one used to build
@@ -193,25 +224,57 @@ func newChromemStoreWithEmb(cfg config.Config, embFn chromem.EmbeddingFunc) (Sto
 func (s *chromemStore) Add(ctx context.Context, content, memType string, tags []string) (string, error) {
 	id := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.addRaw(ctx, id, content, memType, tags, now); err != nil {
+	if err := s.addMemory(ctx, id, content, memType, tags, now); err != nil {
 		return "", err
 	}
 	return id, nil
 }
 
-func (s *chromemStore) addRaw(ctx context.Context, id, content, memType string, tags []string, createdAt string) error {
+// addMemory stores a memory to the vector collection (with chunking for large
+// content) and to the metaIndex. Used by Add, Update, and Migrate.
+//
+// Content that fits within chunkSizeWords is stored as a single chromem document
+// with ID equal to the memory ID (backward-compatible with pre-chunking data).
+// Larger content is split into overlapping chunks stored as separate chromem
+// documents (IDs: "{id}:chunk:{n}") with a "parent_id" metadata field pointing
+// back to the memory ID; the full content is always preserved in the metaIndex.
+func (s *chromemStore) addMemory(ctx context.Context, id, content, memType string, tags []string, createdAt string) error {
 	tagsJSON, _ := json.Marshal(tags)
-	if err := s.col.AddDocument(ctx, chromem.Document{
-		ID:      id,
-		Content: content,
-		Metadata: map[string]string{
-			"type":       memType,
-			"tags":       string(tagsJSON),
-			"created_at": createdAt,
-		},
-	}); err != nil {
-		return fmt.Errorf("adding to vector store: %w", err)
+	baseMeta := map[string]string{
+		"type":       memType,
+		"tags":       string(tagsJSON),
+		"created_at": createdAt,
 	}
+
+	chunks := chunkText(content)
+	if len(chunks) == 1 {
+		if err := s.col.AddDocument(ctx, chromem.Document{
+			ID:       id,
+			Content:  content,
+			Metadata: baseMeta,
+		}); err != nil {
+			return fmt.Errorf("adding to vector store: %w", err)
+		}
+	} else {
+		chunkMeta := make(map[string]string, len(baseMeta)+1)
+		for k, v := range baseMeta {
+			chunkMeta[k] = v
+		}
+		chunkMeta["parent_id"] = id
+
+		for i, chunk := range chunks {
+			if err := s.col.AddDocument(ctx, chromem.Document{
+				ID:       fmt.Sprintf("%s:chunk:%d", id, i),
+				Content:  chunk,
+				Metadata: chunkMeta,
+			}); err != nil {
+				// Clean up any chunks already written.
+				_ = s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
+				return fmt.Errorf("adding chunk %d to vector store: %w", i, err)
+			}
+		}
+	}
+
 	return s.meta.set(Memory{
 		ID:        id,
 		Content:   content,
@@ -219,6 +282,16 @@ func (s *chromemStore) addRaw(ctx context.Context, id, content, memType string, 
 		Tags:      tags,
 		CreatedAt: createdAt,
 	})
+}
+
+// deleteChromemDocs removes all chromem documents belonging to a memory. It
+// handles both the legacy single-document format (doc ID == memory ID) and the
+// chunked format (docs with "parent_id" metadata == memory ID).
+func (s *chromemStore) deleteChromemDocs(ctx context.Context, id string) error {
+	if err := s.col.Delete(ctx, nil, nil, id); err != nil {
+		return fmt.Errorf("deleting from vector store: %w", err)
+	}
+	return s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
 }
 
 func (s *chromemStore) Search(ctx context.Context, query string, minScore float32) ([]MemoryResult, error) {
@@ -232,23 +305,34 @@ func (s *chromemStore) Search(ctx context.Context, query string, minScore float3
 		return nil, fmt.Errorf("querying vector store: %w", err)
 	}
 
-	out := make([]MemoryResult, 0, len(results))
+	// Deduplicate by memory ID: chunk results resolve to their parent, direct
+	// results use their own ID. Keep the highest score per memory.
+	type entry struct {
+		mem   Memory
+		score float32
+	}
+	seen := make(map[string]entry)
+
 	for _, r := range results {
 		if r.Similarity < minScore {
 			continue
 		}
-		var tags []string
-		_ = json.Unmarshal([]byte(r.Metadata["tags"]), &tags)
-		out = append(out, MemoryResult{
-			Memory: Memory{
-				ID:        r.ID,
-				Content:   r.Content,
-				Type:      r.Metadata["type"],
-				Tags:      tags,
-				CreatedAt: r.Metadata["created_at"],
-			},
-			Score: r.Similarity,
-		})
+		memID := r.ID
+		if pid := r.Metadata["parent_id"]; pid != "" {
+			memID = pid
+		}
+		mem, ok := s.meta.get(memID)
+		if !ok {
+			continue // orphaned chunk, skip
+		}
+		if e, exists := seen[memID]; !exists || r.Similarity > e.score {
+			seen[memID] = entry{mem: mem, score: r.Similarity}
+		}
+	}
+
+	out := make([]MemoryResult, 0, len(seen))
+	for _, e := range seen {
+		out = append(out, MemoryResult{Memory: e.mem, Score: e.score})
 	}
 	return out, nil
 }
@@ -273,8 +357,8 @@ func (s *chromemStore) Delete(ctx context.Context, id string) error {
 	if _, err := s.GetByID(ctx, id); err != nil {
 		return err
 	}
-	if err := s.col.Delete(ctx, nil, nil, id); err != nil {
-		return fmt.Errorf("deleting from vector store: %w", err)
+	if err := s.deleteChromemDocs(ctx, id); err != nil {
+		return err
 	}
 	return s.meta.remove(id)
 }
@@ -284,8 +368,8 @@ func (s *chromemStore) Update(ctx context.Context, id, content string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.col.Delete(ctx, nil, nil, id); err != nil {
-		return fmt.Errorf("deleting for update: %w", err)
+	if err := s.deleteChromemDocs(ctx, id); err != nil {
+		return err
 	}
-	return s.addRaw(ctx, id, content, existing.Type, existing.Tags, existing.CreatedAt)
+	return s.addMemory(ctx, id, content, existing.Type, existing.Tags, existing.CreatedAt)
 }

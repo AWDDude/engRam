@@ -60,7 +60,7 @@ func migrateWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 	}
 
 	for i, mem := range memories {
-		if err := newStore.(*chromemStore).addRaw(ctx, mem.ID, mem.Content, mem.Type, mem.Tags, mem.CreatedAt); err != nil {
+		if err := newStore.(*chromemStore).addMemory(ctx, mem.ID, mem.Content, mem.Type, mem.Tags, mem.CreatedAt); err != nil {
 			return i, fmt.Errorf("migrating memory %s: %w", mem.ID, err)
 		}
 		fmt.Fprintf(w, "  [%d/%d] migrated %s\n", i+1, len(memories), mem.ID)

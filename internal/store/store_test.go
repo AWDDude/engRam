@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 
@@ -309,6 +310,221 @@ func TestStore_Add_TaskAndActionTypes(t *testing.T) {
 	}
 	if action.Type != "action" {
 		t.Errorf("expected type 'action', got %q", action.Type)
+	}
+}
+
+// largeContent returns a string with at least n words.
+func largeContent(n int) string {
+	words := make([]string, n)
+	for i := range words {
+		words[i] = fmt.Sprintf("word%d", i)
+	}
+	return strings.Join(words, " ")
+}
+
+func TestStore_Chunking_LargeContentStoredAndRetrieved(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	content := largeContent(chunkSizeWords + 50)
+	id, err := s.Add(ctx, content, "fact", []string{"large"})
+	if err != nil {
+		t.Fatalf("Add large content: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if mem.Content != content {
+		t.Error("GetByID returned wrong content for chunked memory")
+	}
+}
+
+func TestStore_Chunking_SearchReturnsFullContent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	content := largeContent(chunkSizeWords + 50)
+	id, err := s.Add(ctx, content, "fact", nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	results, err := s.Search(ctx, "word0 word1 word2", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected search to find chunked memory")
+	}
+
+	found := false
+	for _, r := range results {
+		if r.ID == id {
+			if r.Content != content {
+				t.Error("search result has wrong content for chunked memory")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("chunked memory ID not found in search results")
+	}
+}
+
+func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Content large enough to produce multiple chunks
+	content := largeContent(chunkSizeWords*2 + 10)
+	id, err := s.Add(ctx, content, "fact", nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	results, err := s.Search(ctx, "word0", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	count := 0
+	for _, r := range results {
+		if r.ID == id {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected chunked memory to appear exactly once in results, got %d", count)
+	}
+}
+
+func TestStore_Chunking_Delete(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, largeContent(chunkSizeWords+50), "fact", nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.GetByID(ctx, id); err == nil {
+		t.Error("expected error after deleting chunked memory, got nil")
+	}
+	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
+	results, err := s.Search(ctx, "word0", 0)
+	if err != nil {
+		t.Fatalf("Search after delete: %v", err)
+	}
+	for _, r := range results {
+		if r.ID == id {
+			t.Error("deleted chunked memory still appears in search results")
+		}
+	}
+}
+
+func TestStore_Chunking_Update(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Store large content (chunked), then update with short content (single doc).
+	id, err := s.Add(ctx, largeContent(chunkSizeWords+50), "fact", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := "short updated content"
+	if err := s.Update(ctx, id, newContent); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetByID after update: %v", err)
+	}
+	if mem.Content != newContent {
+		t.Errorf("expected updated content %q, got %q", newContent, mem.Content)
+	}
+	if mem.Type != "fact" {
+		t.Errorf("type not preserved after update: %q", mem.Type)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "tag1" {
+		t.Errorf("tags not preserved after update: %v", mem.Tags)
+	}
+}
+
+func TestStore_ChunkText(t *testing.T) {
+	// Short content: single chunk.
+	single := chunkText("hello world")
+	if len(single) != 1 {
+		t.Errorf("expected 1 chunk for short text, got %d", len(single))
+	}
+
+	// Exactly at limit: single chunk.
+	atLimit := chunkText(largeContent(chunkSizeWords))
+	if len(atLimit) != 1 {
+		t.Errorf("expected 1 chunk at limit, got %d", len(atLimit))
+	}
+
+	// Over limit: multiple chunks.
+	over := chunkText(largeContent(chunkSizeWords + 1))
+	if len(over) < 2 {
+		t.Errorf("expected multiple chunks over limit, got %d", len(over))
+	}
+
+	// Each chunk should be at most chunkSizeWords words.
+	for i, chunk := range over {
+		words := strings.Fields(chunk)
+		if len(words) > chunkSizeWords {
+			t.Errorf("chunk %d has %d words, exceeds chunkSizeWords=%d", i, len(words), chunkSizeWords)
+		}
+	}
+}
+
+func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "short content", "fact", []string{"tag1"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := largeContent(chunkSizeWords + 50)
+	if err := s.Update(ctx, id, newContent); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetByID after update: %v", err)
+	}
+	if mem.Content != newContent {
+		t.Error("GetByID returned wrong content after short-to-long update")
+	}
+	if mem.Type != "fact" {
+		t.Errorf("type not preserved: %q", mem.Type)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "tag1" {
+		t.Errorf("tags not preserved: %v", mem.Tags)
+	}
+
+	// Verify it's searchable and deduplicated.
+	results, err := s.Search(ctx, "word0 word1", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	count := 0
+	for _, r := range results {
+		if r.ID == id {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected memory to appear once in search after short-to-long update, got %d", count)
 	}
 }
 
