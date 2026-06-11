@@ -36,17 +36,11 @@ func (m *mockStore) Add(_ context.Context, content, memType string, tags []strin
 	return id, nil
 }
 
-func (m *mockStore) Search(_ context.Context, query string, limit int, typeFilter string) ([]store.MemoryResult, error) {
+func (m *mockStore) Search(_ context.Context, query string, _ float32) ([]store.MemoryResult, error) {
 	var results []store.MemoryResult
 	for _, mem := range m.memories {
-		if typeFilter != "" && mem.Type != typeFilter {
-			continue
-		}
 		if strings.Contains(mem.Content, query) {
 			results = append(results, store.MemoryResult{Memory: mem, Score: 0.9})
-		}
-		if limit > 0 && len(results) >= limit {
-			break
 		}
 	}
 	return results, nil
@@ -249,7 +243,7 @@ func TestHandleSearchMemory_MissingQuery(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_NoLimitReturnsAll(t *testing.T) {
+func TestHandleSearchMemory_ReturnsResults(t *testing.T) {
 	ms := newMockStore()
 	for i := 0; i < 10; i++ {
 		ms.memories[fmt.Sprintf("id-%d", i)] = store.Memory{
@@ -270,20 +264,20 @@ func TestHandleSearchMemory_NoLimitReturnsAll(t *testing.T) {
 	var results []store.MemoryResult
 	json.Unmarshal([]byte(resultText(t, result)), &results) //nolint:errcheck
 	if len(results) != 10 {
-		t.Errorf("expected all 10 results with no limit, got %d", len(results))
+		t.Errorf("expected 10 results, got %d", len(results))
 	}
 }
 
-func TestHandleSearchMemory_WithLimit(t *testing.T) {
+func TestHandleSearchMemory_CustomMinScore(t *testing.T) {
+	var capturedScore float32
 	ms := newMockStore()
-	for i := 0; i < 10; i++ {
-		ms.memories[fmt.Sprintf("id-%d", i)] = store.Memory{
-			ID: fmt.Sprintf("id-%d", i), Content: "item", Type: "fact",
-		}
-	}
-	app := &App{store: ms}
+	ms.memories["id-1"] = store.Memory{ID: "id-1", Content: "item", Type: "fact"}
 
-	req := makeRequest(map[string]any{"query": "item", "limit": 3})
+	// wrap Search to capture the minScore arg
+	app := &App{store: &captureScoreStore{mockStore: ms, onSearch: func(s float32) { capturedScore = s }}}
+
+	minScore := 0.8
+	req := makeRequest(map[string]any{"query": "item", "min_score": minScore})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -291,11 +285,32 @@ func TestHandleSearchMemory_WithLimit(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
+	if capturedScore != float32(minScore) {
+		t.Errorf("expected min_score %.1f, got %.1f", minScore, capturedScore)
+	}
+}
 
-	var results []store.MemoryResult
-	json.Unmarshal([]byte(resultText(t, result)), &results) //nolint:errcheck
-	if len(results) != 3 {
-		t.Errorf("expected 3 results with limit=3, got %d", len(results))
+// captureScoreStore wraps mockStore to capture the minScore passed to Search.
+type captureScoreStore struct {
+	*mockStore
+	onSearch func(float32)
+}
+
+func (c *captureScoreStore) Search(ctx context.Context, query string, minScore float32) ([]store.MemoryResult, error) {
+	c.onSearch(minScore)
+	return c.mockStore.Search(ctx, query, minScore)
+}
+
+func TestHandleDeleteMemory_StoreError(t *testing.T) {
+	app := &App{store: newMockStore()}
+	req := makeRequest(map[string]any{"memory_id": "nonexistent"})
+
+	result, err := app.handleDeleteMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error result when deleting nonexistent memory")
 	}
 }
 

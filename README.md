@@ -99,18 +99,23 @@ Migration is atomic — the new collection is fully built before the old one is 
 | Tool | Required | Optional |
 |------|----------|----------|
 | `store` | `content`, `type` | `tags` |
-| `search` | `query` | `limit` (omit for all), `type_filter` |
+| `search` | `query` | `min_score` (default 0.5) |
 | `list` | — | `type_filter`, `tag_filter`, `limit` (default 20) |
 | `delete` | `memory_id` | — |
 | `update` | `memory_id`, `content` | — |
 
 **Memory types:** `preference`, `task`, `fact`, `action`
 
+`min_score` is a cosine similarity threshold (0–1). Results below it are excluded. Omit to use the default of 0.5.
+
+`delete` and `update` return an error if `memory_id` does not exist.
+
 ### Examples
 
 ```
 store(content="prefers dark mode", type="preference", tags=["ui"])
-search(query="UI preferences", limit=3)
+search(query="UI preferences")
+search(query="UI preferences", min_score=0.7)
 list(type_filter="fact", tag_filter="kubernetes")
 update(memory_id="<id>", content="updated content")
 delete(memory_id="<id>")

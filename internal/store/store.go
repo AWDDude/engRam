@@ -34,7 +34,7 @@ type MemoryResult struct {
 // Store is the persistence interface for memories.
 type Store interface {
 	Add(ctx context.Context, content, memType string, tags []string) (string, error)
-	Search(ctx context.Context, query string, limit int, typeFilter string) ([]MemoryResult, error)
+	Search(ctx context.Context, query string, minScore float32) ([]MemoryResult, error)
 	List(ctx context.Context, typeFilter, tagFilter string, limit int) ([]Memory, error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
@@ -221,27 +221,22 @@ func (s *chromemStore) addRaw(ctx context.Context, id, content, memType string, 
 	})
 }
 
-func (s *chromemStore) Search(ctx context.Context, query string, limit int, typeFilter string) ([]MemoryResult, error) {
+func (s *chromemStore) Search(ctx context.Context, query string, minScore float32) ([]MemoryResult, error) {
 	count := s.col.Count()
 	if count == 0 {
 		return []MemoryResult{}, nil
 	}
-	if limit <= 0 || limit > count {
-		limit = count
-	}
 
-	var where map[string]string
-	if typeFilter != "" {
-		where = map[string]string{"type": typeFilter}
-	}
-
-	results, err := s.col.Query(ctx, query, limit, where, nil)
+	results, err := s.col.Query(ctx, query, count, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("querying vector store: %w", err)
 	}
 
 	out := make([]MemoryResult, 0, len(results))
 	for _, r := range results {
+		if r.Similarity < minScore {
+			continue
+		}
 		var tags []string
 		_ = json.Unmarshal([]byte(r.Metadata["tags"]), &tags)
 		out = append(out, MemoryResult{
@@ -275,6 +270,9 @@ func (s *chromemStore) GetByID(_ context.Context, id string) (Memory, error) {
 }
 
 func (s *chromemStore) Delete(ctx context.Context, id string) error {
+	if _, err := s.GetByID(ctx, id); err != nil {
+		return err
+	}
 	if err := s.col.Delete(ctx, nil, nil, id); err != nil {
 		return fmt.Errorf("deleting from vector store: %w", err)
 	}

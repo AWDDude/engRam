@@ -102,7 +102,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", 5, "")
+	results, err := s.Search(ctx, "anything", 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", 5, "")
+	results, err := s.Search(ctx, "terminal preferences", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -136,27 +136,6 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 	}
 }
 
-func TestStore_Search_TypeFilter(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-
-	if _, err := s.Add(ctx, "prefers vim keybindings", "preference", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Add(ctx, "works on AI Gateway team", "fact", nil); err != nil {
-		t.Fatal(err)
-	}
-
-	results, err := s.Search(ctx, "preferences", 5, "preference")
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	for _, r := range results {
-		if r.Type != "preference" {
-			t.Errorf("type filter not applied: got type %q", r.Type)
-		}
-	}
-}
 
 func TestStore_List_All(t *testing.T) {
 	ctx := context.Background()
@@ -256,6 +235,15 @@ func TestStore_Delete(t *testing.T) {
 	}
 }
 
+func TestStore_Delete_NotFound(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.Delete(ctx, "nonexistent-id"); err == nil {
+		t.Error("expected error deleting nonexistent memory, got nil")
+	}
+}
+
 func TestStore_Update(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -334,7 +322,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", 0, "")
+	results, err := s.Search(ctx, "memory item", 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}

@@ -30,9 +30,8 @@ type storeMemoryArgs struct {
 }
 
 type searchMemoryArgs struct {
-	Query      string `json:"query"`
-	Limit      int    `json:"limit"`
-	TypeFilter string `json:"type_filter"`
+	Query    string   `json:"query"`
+	MinScore *float64 `json:"min_score"`
 }
 
 type listMemoriesArgs struct {
@@ -80,7 +79,11 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if args.Query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
-	results, err := a.store.Search(ctx, args.Query, args.Limit, args.TypeFilter)
+	minScore := float32(0.5)
+	if args.MinScore != nil {
+		minScore = float32(*args.MinScore)
+	}
+	results, err := a.store.Search(ctx, args.Query, minScore)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}

@@ -73,7 +73,7 @@ internal/server/     # App + MCP handlers + RegisterTools
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
 | `store` | content, type | tags |
-| `search` | query | limit (5), type_filter |
+| `search` | query | min_score (default 0.5) |
 | `list` | — | type_filter, tag_filter, limit (20) |
 | `delete` | memory_id | — |
 | `update` | memory_id, content | — |
