@@ -31,7 +31,7 @@ func main() {
 	defer cleanup()
 
 	s := mcpserver.NewMCPServer("engram", "1.0.0")
-	server.RegisterTools(s, server.NewApp(st))
+	server.RegisterTools(s, server.NewApp(st, float32(cfg.DefaultMinScore)))
 
 	if err := mcpserver.ServeStdio(s); err != nil {
 		fmt.Fprintf(os.Stderr, "engram: server error: %v\n", err)

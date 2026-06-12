@@ -23,8 +23,9 @@ type DBConfig struct {
 
 // Config holds all runtime configuration for engram.
 type Config struct {
-	Model ModelConfig `json:"model"`
-	DB    DBConfig    `json:"db"`
+	Model        ModelConfig `json:"model"`
+	DB           DBConfig    `json:"db"`
+	DefaultMinScore float64  `json:"default_min_score"`
 }
 
 // dataDir returns the user data directory for engram.
@@ -56,6 +57,7 @@ func Default() Config {
 		DB: DBConfig{
 			Path: filepath.Join(base, "db"),
 		},
+		DefaultMinScore: 0.5,
 	}
 }
 
@@ -127,8 +129,14 @@ func Load() (Config, error) {
 	if parsed.DB.Path == "" {
 		missing = append(missing, "db.path")
 	}
+	if parsed.DefaultMinScore == 0 {
+		missing = append(missing, "search.default_min_score")
+	}
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("config %s missing required fields: %s", configPath, strings.Join(missing, ", "))
+	}
+	if parsed.DefaultMinScore < 0 || parsed.DefaultMinScore > 1 {
+		return Config{}, fmt.Errorf("config %s: search.default_min_score must be between 0 and 1", configPath)
 	}
 	return parsed, nil
 }

@@ -12,12 +12,13 @@ import (
 
 // App holds shared dependencies for all tool handlers.
 type App struct {
-	store store.Store
+	store           store.Store
+	defaultMinScore float32
 }
 
-// NewApp constructs an App with the given store.
-func NewApp(s store.Store) *App {
-	return &App{store: s}
+// NewApp constructs an App with the given store and default search threshold.
+func NewApp(s store.Store, defaultMinScore float32) *App {
+	return &App{store: s, defaultMinScore: defaultMinScore}
 }
 
 // Argument structs — one per tool. BindArguments unmarshals the MCP request
@@ -79,7 +80,7 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if args.Query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
-	minScore := float32(0.5)
+	minScore := a.defaultMinScore
 	if args.MinScore != nil {
 		minScore = float32(*args.MinScore)
 	}

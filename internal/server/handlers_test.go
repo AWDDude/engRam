@@ -301,6 +301,25 @@ func (c *captureScoreStore) Search(ctx context.Context, query string, minScore f
 	return c.mockStore.Search(ctx, query, minScore)
 }
 
+func TestHandleSearchMemory_DefaultMinScore(t *testing.T) {
+	var capturedScore float32
+	ms := newMockStore()
+	ms.memories["id-1"] = store.Memory{ID: "id-1", Content: "item", Type: "fact"}
+
+	app := NewApp(&captureScoreStore{mockStore: ms, onSearch: func(s float32) { capturedScore = s }}, 0.7)
+	req := makeRequest(map[string]any{"query": "item"})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	if capturedScore != 0.7 {
+		t.Errorf("expected default min_score 0.7, got %.2f", capturedScore)
+	}
+}
+
 func TestHandleDeleteMemory_StoreError(t *testing.T) {
 	app := &App{store: newMockStore()}
 	req := makeRequest(map[string]any{"memory_id": "nonexistent"})

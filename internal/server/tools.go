@@ -46,7 +46,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("The search query"),
 			),
 			mcp.WithNumber("min_score",
-				mcp.Description("Minimum cosine similarity threshold (0–1, default 0.5)"),
+				mcp.Description("Minimum cosine similarity threshold (0–1, overrides the configured default)"),
 			),
 		),
 		app.handleSearchMemory,
