@@ -13,6 +13,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 - **Semantic search** with optional type filtering
 - **XDG-compliant** data and config paths on all platforms
 - **Model migration** — switch embedding models without losing memories
+- **CSV export/import** — back up and restore all memories
 
 ## Installation
 
@@ -93,6 +94,17 @@ engram reembed
 ```
 
 Re-embedding is atomic — the new collection is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
+
+## Export / import
+
+Back up all memories to a CSV file, or restore them from one:
+
+```bash
+engram export -f memories.csv
+engram import -f memories.csv
+```
+
+The CSV has columns `id, content, type, tags, created_at` (tags joined with `;`). Import preserves IDs, tags, and creation timestamps from the file; rows with a blank ID are assigned a new one.
 
 ## Tools
 

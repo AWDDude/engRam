@@ -12,9 +12,18 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "reembed" {
-		runReembed()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "reembed":
+			runReembed()
+			return
+		case "export":
+			runExport()
+			return
+		case "import":
+			runImport()
+			return
+		}
 	}
 
 	cfg, err := config.Load()
