@@ -12,22 +12,22 @@ import (
 	"github.com/AWDDude/engRam/internal/config"
 )
 
-// Migrate re-embeds all memories from the current model's collection into the
+// Reembed re-embeds all memories from the current model's collection into the
 // new model specified in cfg, updates db_meta.json, then removes the old
 // collection directory. Progress is written to w. Returns the number of
-// memories migrated.
-func Migrate(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
+// memories re-embedded.
+func Reembed(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
 	embFn, cleanup, err := newEmbeddingFunc(ctx, cfg.Model.Path, cfg.Model.EmbeddingModel)
 	if err != nil {
 		return 0, fmt.Errorf("initializing new model: %w", err)
 	}
 	defer cleanup()
-	return migrateWithEmb(ctx, cfg, embFn, w)
+	return reembedWithEmb(ctx, cfg, embFn, w)
 }
 
-// migrateWithEmb performs the migration with an injectable embedding function.
+// reembedWithEmb performs the re-embedding with an injectable embedding function.
 // Exists to allow tests to run without a live model download.
-func migrateWithEmb(ctx context.Context, cfg config.Config, embFn chromem.EmbeddingFunc, w io.Writer) (int, error) {
+func reembedWithEmb(ctx context.Context, cfg config.Config, embFn chromem.EmbeddingFunc, w io.Writer) (int, error) {
 	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
 		return 0, fmt.Errorf("creating db dir: %w", err)
 	}
@@ -40,7 +40,7 @@ func migrateWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 		return 0, fmt.Errorf("no existing database found at %s", cfg.DB.Path)
 	}
 	if meta.ActiveModel == cfg.Model.EmbeddingModel {
-		return 0, fmt.Errorf("already using model %q, no migration needed", cfg.Model.EmbeddingModel)
+		return 0, fmt.Errorf("already using model %q, no re-embedding needed", cfg.Model.EmbeddingModel)
 	}
 
 	oldModel := meta.ActiveModel
@@ -52,7 +52,7 @@ func migrateWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 	}
 	memories := oldIdx.list("", "", 0)
 
-	fmt.Fprintf(w, "Migrating %d memories from %q to %q...\n", len(memories), oldModel, cfg.Model.EmbeddingModel)
+	fmt.Fprintf(w, "Re-embedding %d memories from %q to %q...\n", len(memories), oldModel, cfg.Model.EmbeddingModel)
 
 	newStore, err := newChromemStoreWithEmb(cfg, embFn)
 	if err != nil {
@@ -61,9 +61,9 @@ func migrateWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 
 	for i, mem := range memories {
 		if err := newStore.(*chromemStore).addMemory(ctx, mem.ID, mem.Content, mem.Type, mem.Tags, mem.CreatedAt); err != nil {
-			return i, fmt.Errorf("migrating memory %s: %w", mem.ID, err)
+			return i, fmt.Errorf("re-embedding memory %s: %w", mem.ID, err)
 		}
-		fmt.Fprintf(w, "  [%d/%d] migrated %s\n", i+1, len(memories), mem.ID)
+		fmt.Fprintf(w, "  [%d/%d] re-embedded %s\n", i+1, len(memories), mem.ID)
 	}
 
 	if err := saveDBMeta(cfg.DB.Path, dbMeta{ActiveModel: cfg.Model.EmbeddingModel}); err != nil {

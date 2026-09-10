@@ -11,20 +11,20 @@ import (
 	"github.com/AWDDude/engRam/internal/config"
 )
 
-func TestMigrateWithEmb_NoExistingDB(t *testing.T) {
+func TestReembedWithEmb_NoExistingDB(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Config{
 		DB:    config.DBConfig{Path: dir},
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
 
-	_, err := migrateWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	_, err := reembedWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err == nil {
 		t.Error("expected error when no db_meta.json found")
 	}
 }
 
-func TestMigrateWithEmb_SameModel(t *testing.T) {
+func TestReembedWithEmb_SameModel(t *testing.T) {
 	dir := t.TempDir()
 	if err := saveDBMeta(dir, dbMeta{ActiveModel: "same-model"}); err != nil {
 		t.Fatal(err)
@@ -34,13 +34,13 @@ func TestMigrateWithEmb_SameModel(t *testing.T) {
 		Model: config.ModelConfig{EmbeddingModel: "same-model"},
 	}
 
-	_, err := migrateWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	_, err := reembedWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err == nil {
 		t.Error("expected error when model is already the same")
 	}
 }
 
-func TestMigrateWithEmb_HappyPath(t *testing.T) {
+func TestReembedWithEmb_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
@@ -59,17 +59,17 @@ func TestMigrateWithEmb_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Run migration
+	// Run re-embedding
 	cfg := config.Config{
 		DB:    config.DBConfig{Path: dir},
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
-	n, err := migrateWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	n, err := reembedWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err != nil {
-		t.Fatalf("migrateWithEmb: %v", err)
+		t.Fatalf("reembedWithEmb: %v", err)
 	}
 	if n != 2 {
-		t.Errorf("expected 2 memories migrated, got %d", n)
+		t.Errorf("expected 2 memories re-embedded, got %d", n)
 	}
 
 	// db_meta.json points to new model
@@ -103,7 +103,7 @@ func TestMigrateWithEmb_HappyPath(t *testing.T) {
 	}
 }
 
-func TestMigrateWithEmb_PreservesMetadata(t *testing.T) {
+func TestReembedWithEmb_PreservesMetadata(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
@@ -125,7 +125,7 @@ func TestMigrateWithEmb_PreservesMetadata(t *testing.T) {
 		DB:    config.DBConfig{Path: dir},
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
-	if _, err := migrateWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard); err != nil {
+	if _, err := reembedWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 

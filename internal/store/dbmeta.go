@@ -22,7 +22,7 @@ type ModelChangedError struct {
 
 func (e *ModelChangedError) Error() string {
 	return fmt.Sprintf(
-		"embedding model changed from %q to %q — run 'engram migrate' to re-embed all memories",
+		"embedding model changed from %q to %q — run 'engram reembed' to re-embed all memories",
 		e.OldModel, e.NewModel,
 	)
 }

@@ -62,8 +62,8 @@ func TestModelChangedError_Message(t *testing.T) {
 	if !strings.Contains(msg, "new/model") {
 		t.Errorf("expected error to contain new model name, got: %s", msg)
 	}
-	if !strings.Contains(msg, "engram migrate") {
-		t.Errorf("expected error to mention 'engram migrate', got: %s", msg)
+	if !strings.Contains(msg, "engram reembed") {
+		t.Errorf("expected error to mention 'engram reembed', got: %s", msg)
 	}
 }
 

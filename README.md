@@ -75,7 +75,7 @@ If the config file does not exist, engram creates it with defaults on first run.
 }
 ```
 
-> **Warning:** changing `model.embedding_model` requires a migration — engram will refuse to start and tell you to run `engram migrate`.
+> **Warning:** changing `model.embedding_model` requires a re-embed — engram will refuse to start and tell you to run `engram reembed`.
 
 ## Switching embedding models
 
@@ -83,16 +83,16 @@ If you change `model.embedding_model` in your config, engram will detect the mis
 
 ```
 engram: embedding model changed from "KnightsAnalytics/all-MiniLM-L6-v2" to "your/new-model"
-— run 'engram migrate' to re-embed all memories
+— run 'engram reembed' to re-embed all memories
 ```
 
-Run the migration command to re-embed all memories with the new model:
+Run the reembed command to re-embed all memories with the new model:
 
 ```bash
-engram migrate
+engram reembed
 ```
 
-Migration is atomic — the new collection is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
+Re-embedding is atomic — the new collection is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
 
 ## Tools
 

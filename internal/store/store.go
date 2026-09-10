@@ -165,7 +165,7 @@ func chunkText(text string) []string {
 // NewChromemStore creates a production store backed by hugot (GoMLX) for embeddings.
 // The second return value is a cleanup func that must be called when the process exits.
 // Returns ModelChangedError if the configured model differs from the one used to build
-// the existing database — run 'engram migrate' to resolve.
+// the existing database — run 'engram reembed' to resolve.
 func NewChromemStore(cfg config.Config) (Store, func(), error) {
 	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
 		return nil, nil, fmt.Errorf("creating db dir: %w", err)
@@ -231,7 +231,7 @@ func (s *chromemStore) Add(ctx context.Context, content, memType string, tags []
 }
 
 // addMemory stores a memory to the vector collection (with chunking for large
-// content) and to the metaIndex. Used by Add, Update, and Migrate.
+// content) and to the metaIndex. Used by Add, Update, and Reembed.
 //
 // Content that fits within chunkSizeWords is stored as a single chromem document
 // with ID equal to the memory ID (backward-compatible with pre-chunking data).
