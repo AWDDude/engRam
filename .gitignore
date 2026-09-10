@@ -2,3 +2,4 @@
 /db/
 /models/
 /config.json
+.DS_Store
