@@ -57,7 +57,7 @@ func importStore(ctx context.Context, st Store, r io.Reader) (int, error) {
 			return n, fmt.Errorf("record %d: expected %d fields, got %d", n+1, len(csvHeader), len(record))
 		}
 
-		id, content, memType, tagsField, createdAt := record[0], record[1], record[2], record[3], record[4]
+		id, title, content, tagsField, linkedIDsField, createdAt := record[0], record[1], record[2], record[3], record[4], record[5]
 		if id == "" {
 			id = uuid.NewString()
 		}
@@ -65,8 +65,16 @@ func importStore(ctx context.Context, st Store, r io.Reader) (int, error) {
 		if tagsField != "" {
 			tags = strings.Split(tagsField, ";")
 		}
+		var linkedIDs []string
+		if linkedIDsField != "" {
+			linkedIDs = strings.Split(linkedIDsField, ";")
+		}
 
-		if err := cs.addMemory(ctx, id, content, memType, tags, createdAt); err != nil {
+		// Raw path: linked_ids are restored verbatim, with no existence
+		// validation or bidirectional sync. CSV row order doesn't guarantee a
+		// link's target precedes it, and the export that produced this file
+		// was already internally consistent — see addMemory's doc comment.
+		if err := cs.addMemory(ctx, id, title, content, tags, linkedIDs, createdAt); err != nil {
 			return n, fmt.Errorf("importing memory %s: %w", id, err)
 		}
 		n++

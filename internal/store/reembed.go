@@ -50,7 +50,7 @@ func reembedWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 	if err != nil {
 		return 0, fmt.Errorf("loading old memories: %w", err)
 	}
-	memories := oldIdx.list("", "", 0)
+	memories := oldIdx.list("", 0)
 
 	fmt.Fprintf(w, "Re-embedding %d memories from %q to %q...\n", len(memories), oldModel, cfg.Model.EmbeddingModel)
 
@@ -60,7 +60,7 @@ func reembedWithEmb(ctx context.Context, cfg config.Config, embFn chromem.Embedd
 	}
 
 	for i, mem := range memories {
-		if err := newStore.(*chromemStore).addMemory(ctx, mem.ID, mem.Content, mem.Type, mem.Tags, mem.CreatedAt); err != nil {
+		if err := newStore.(*chromemStore).addMemory(ctx, mem.ID, mem.Title, mem.Content, mem.Tags, mem.LinkedIDs, mem.CreatedAt); err != nil {
 			return i, fmt.Errorf("re-embedding memory %s: %w", mem.ID, err)
 		}
 		fmt.Fprintf(w, "  [%d/%d] re-embedded %s\n", i+1, len(memories), mem.ID)

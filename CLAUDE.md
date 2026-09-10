@@ -64,7 +64,7 @@ internal/server/     # App + MCP handlers + RegisterTools
 
 - **`Store` interface** (`internal/store/store.go`) — all persistence behind one interface, fully mockable
 - **`chromemStore`** — production: chromem-go vectors + `metaIndex` sidecar for listing
-- **`metaIndex`** — JSON file of all Memory records; handles List/GetByID without a vector query
+- **`metaIndex`** — JSON file of all Memory records; handles Search's tag-only path/GetByID without a vector query
 - **`App`** + **handlers** (`internal/server/`) — one method per MCP tool, uses `BindArguments` for typed arg parsing
 - **`RegisterTools`** (`internal/server/tools.go`) — declarative tool schema registration
 
@@ -72,8 +72,10 @@ internal/server/     # App + MCP handlers + RegisterTools
 
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
-| `store` | content, type | tags |
-| `search` | query | min_score (default 0.5) |
-| `list` | — | type_filter, tag_filter, limit (20) |
+| `store` | title (≤100 chars), content | tags, linked_ids |
+| `search` | query and/or tag_filter (at least one) | min_score (query only, default from config), limit (default from config; 0/negative = unlimited) |
+| `retrieve` | memory_id | — |
 | `delete` | memory_id | — |
-| `update` | memory_id, content | — |
+| `update` | memory_id, plus at least one of: title, content, tags, linked_ids | — |
+
+`search` returns only `{id, title, tags}` per match; use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.

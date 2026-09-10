@@ -44,13 +44,13 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	// Populate the old model's collection with two memories
+	// Populate the old model's collection with two linked memories
 	oldStore := testNewStoreWithModel(t, dir, "old-model")
-	id1, err := oldStore.Add(ctx, "memory one", "fact", []string{"tag1"})
+	id1, err := oldStore.Add(ctx, "Memory one", "memory one", []string{"tag1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := oldStore.Add(ctx, "memory two", "preference", []string{"tag2"})
+	id2, err := oldStore.Add(ctx, "Memory two", "memory two", []string{"tag2"}, []string{id1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,12 +94,21 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 			t.Errorf("memory %s not found in new store: %v", id, err)
 		}
 	}
-	mems, err := newStore.List(ctx, "", "", 0)
+	results, err := newStore.Search(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(mems) != 2 {
-		t.Errorf("expected 2 memories in new store, got %d", len(mems))
+	if len(results) != 2 {
+		t.Errorf("expected 2 memories in new store, got %d", len(results))
+	}
+
+	// Links preserved without re-validation across the reembed.
+	migrated2, err := newStore.GetByID(ctx, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(migrated2.LinkedIDs, id1) {
+		t.Errorf("expected memory two's link to memory one preserved, got %v", migrated2.LinkedIDs)
 	}
 }
 
@@ -108,7 +117,7 @@ func TestReembedWithEmb_PreservesMetadata(t *testing.T) {
 	dir := t.TempDir()
 
 	oldStore := testNewStoreWithModel(t, dir, "old-model")
-	id, err := oldStore.Add(ctx, "tagged content", "task", []string{"a", "b"})
+	id, err := oldStore.Add(ctx, "Tagged title", "tagged content", []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,11 +143,11 @@ func TestReembedWithEmb_PreservesMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID after migration: %v", err)
 	}
+	if migrated.Title != original.Title {
+		t.Errorf("title mismatch: got %q, want %q", migrated.Title, original.Title)
+	}
 	if migrated.Content != original.Content {
 		t.Errorf("content mismatch: got %q, want %q", migrated.Content, original.Content)
-	}
-	if migrated.Type != original.Type {
-		t.Errorf("type mismatch: got %q, want %q", migrated.Type, original.Type)
 	}
 	if migrated.CreatedAt != original.CreatedAt {
 		t.Errorf("created_at mismatch: got %q, want %q", migrated.CreatedAt, original.CreatedAt)
