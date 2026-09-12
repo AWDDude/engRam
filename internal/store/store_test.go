@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	chromem "github.com/philippgille/chromem-go"
-
 	"github.com/AWDDude/engRam/internal/config"
 )
 
@@ -36,16 +34,17 @@ func testEmbedFunc(_ context.Context, text string) ([]float32, error) {
 
 func newTestStore(t *testing.T) Store {
 	t.Helper()
-	s, err := newChromemStoreWithEmb(
+	s, err := newBoltStoreWithEmb(
 		config.Config{
 			DB:    config.DBConfig{Path: t.TempDir()},
 			Model: config.ModelConfig{EmbeddingModel: "test-model"},
 		},
-		chromem.EmbeddingFunc(testEmbedFunc),
+		EmbeddingFunc(testEmbedFunc),
 	)
 	if err != nil {
 		t.Fatalf("creating test store: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -134,7 +133,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", "", 0, 0)
+	results, err := s.Search(ctx, "anything", "", 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -154,7 +153,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", "", 0, 0)
+	results, err := s.Search(ctx, "terminal preferences", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -176,7 +175,7 @@ func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "some content", "", 0, 0)
+	results, err := s.Search(ctx, "some content", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -202,7 +201,7 @@ func TestStore_Search_TagOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "KUBE", 0, 0)
+	results, err := s.Search(ctx, "", "KUBE", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -222,7 +221,7 @@ func TestStore_Search_TagOnly_All(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "", 0, 0)
+	results, err := s.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -241,12 +240,49 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "", "", 0, 3)
+	results, err := s.Search(ctx, "", "", 3)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(results) != 3 {
 		t.Errorf("expected 3 results with limit, got %d", len(results))
+	}
+}
+
+func TestStore_Search_TagOnly_OrdersByCreatedAtChronologically(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	idOld, err := s.Add(ctx, "Older", "older memory", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idNew, err := s.Add(ctx, "Newer", "newer memory", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force timestamps where a plain string sort ranks them backwards:
+	// RFC3339Nano drops trailing fractional-second zeros, so a whole-second
+	// stamp like "...10:00:00Z" sorts *after* "...10:00:00.3Z" as a string
+	// even though it is chronologically earlier.
+	bs := s.(*boltStore)
+	older := bs.docs[idOld]
+	older.CreatedAt = "2026-01-01T10:00:00Z"
+	bs.docs[idOld] = older
+	newer := bs.docs[idNew]
+	newer.CreatedAt = "2026-01-01T10:00:00.3Z"
+	bs.docs[idNew] = newer
+
+	results, err := s.Search(ctx, "", "", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].ID != idNew {
+		t.Errorf("expected chronologically newer memory %q first, got %q", idNew, results[0].ID)
 	}
 }
 
@@ -261,7 +297,7 @@ func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0, 0)
+	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -425,7 +461,7 @@ func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0 word1 word2", "", 0, 0)
+	results, err := s.Search(ctx, "word0 word1 word2", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -455,7 +491,7 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0", "", 0, 0)
+	results, err := s.Search(ctx, "word0", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -486,7 +522,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, err := s.Search(ctx, "word0", "", 0, 0)
+	results, err := s.Search(ctx, "word0", "", 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -584,7 +620,7 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, err := s.Search(ctx, "word0 word1", "", 0, 0)
+	results, err := s.Search(ctx, "word0 word1", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -609,7 +645,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0, 0)
+	results, err := s.Search(ctx, "memory item", "", 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
@@ -628,7 +664,7 @@ func TestStore_Search_QueryLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0, 3)
+	results, err := s.Search(ctx, "memory item", "", 3)
 	if err != nil {
 		t.Fatalf("Search with limit: %v", err)
 	}
@@ -655,7 +691,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	results, err := s.Search(ctx, "", "", 0, 0)
+	results, err := s.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatalf("Search after concurrent adds: %v", err)
 	}

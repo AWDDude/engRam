@@ -17,7 +17,7 @@ var csvHeader = []string{"id", "title", "content", "tags", "linked_ids", "create
 // linked_ids, created_at; tags and linked_ids are joined with ";"). Returns
 // the number of memories exported.
 func Export(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
-	st, cleanup, err := NewChromemStore(cfg)
+	st, cleanup, err := NewBoltStore(cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -29,8 +29,8 @@ func exportStore(ctx context.Context, st Store, w io.Writer) (int, error) {
 	// Search with an empty query does a tag-only scan (see Store.Search),
 	// which with an empty tag filter and unlimited limit lists every memory
 	// by id — going through the interface keeps Export usable against any
-	// Store implementation rather than only chromemStore.
-	results, err := st.Search(ctx, "", "", 0, 0)
+	// Store implementation rather than only boltStore.
+	results, err := st.Search(ctx, "", "", 0)
 	if err != nil {
 		return 0, fmt.Errorf("listing memories: %w", err)
 	}

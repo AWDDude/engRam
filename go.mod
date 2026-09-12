@@ -6,7 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.8
 	github.com/mark3labs/mcp-go v1.0.0
-	github.com/philippgille/chromem-go v0.7.0
+	go.etcd.io/bbolt v1.5.0
 )
 
 require (

@@ -44,7 +44,7 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 	return id, nil
 }
 
-func (m *mockStore) Search(_ context.Context, query, tagFilter string, _ float32, limit int) ([]store.SearchResult, error) {
+func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
 	if m.searchErr != nil {
 		return nil, m.searchErr
 	}
@@ -111,15 +111,25 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 	return nil
 }
 
-// captureSearchArgsStore wraps mockStore to capture the minScore/limit passed to Search.
+// captureSearchArgsStore wraps mockStore to capture the limit passed to Search.
 type captureSearchArgsStore struct {
 	*mockStore
-	onSearch func(minScore float32, limit int)
+	onSearch func(limit int)
 }
 
-func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]store.SearchResult, error) {
-	c.onSearch(minScore, limit)
-	return c.mockStore.Search(ctx, query, tagFilter, minScore, limit)
+func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
+	c.onSearch(limit)
+	return c.mockStore.Search(ctx, query, tagFilter, limit)
+}
+
+// testMaxContentChars is generous enough that content-size limits never
+// interfere with tests that aren't about them; the limit tests set their own.
+const testMaxContentChars = 32768
+
+// newTestApp builds an App with realistic defaults so individual tests don't
+// have to restate them.
+func newTestApp(s store.Store) *App {
+	return NewApp(s, 20, testMaxContentChars)
 }
 
 // makeRequest builds a CallToolRequest with the given arguments map.
@@ -132,7 +142,7 @@ func makeRequest(args map[string]any) mcp.CallToolRequest {
 // --- store ---
 
 func TestHandleStoreMemory_Success(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{
 		"title":   "Standing desk preference",
 		"content": "David uses a standing desk",
@@ -154,7 +164,7 @@ func TestHandleStoreMemory_Success(t *testing.T) {
 func TestHandleStoreMemory_WithLinkedIDs(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["existing"] = store.Memory{ID: "existing", Title: "Existing", Content: "existing content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{
 		"title":      "New memory",
@@ -187,7 +197,7 @@ func TestHandleStoreMemory_WithLinkedIDs(t *testing.T) {
 func TestHandleStoreMemory_PartialFailureSurfacesID(t *testing.T) {
 	ms := newMockStore()
 	ms.addErr = fmt.Errorf("memory created but linking failed: linked memory %q not found", "missing")
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{
 		"title":      "New memory",
@@ -209,7 +219,7 @@ func TestHandleStoreMemory_PartialFailureSurfacesID(t *testing.T) {
 }
 
 func TestHandleStoreMemory_TitleRequired(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"content": "some content"})
 
 	result, err := app.handleStoreMemory(context.Background(), req)
@@ -222,7 +232,7 @@ func TestHandleStoreMemory_TitleRequired(t *testing.T) {
 }
 
 func TestHandleStoreMemory_TitleTooLong(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{
 		"title":   strings.Repeat("x", 101),
 		"content": "some content",
@@ -238,7 +248,7 @@ func TestHandleStoreMemory_TitleTooLong(t *testing.T) {
 }
 
 func TestHandleStoreMemory_TitleExactly100_OK(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{
 		"title":   strings.Repeat("x", 100),
 		"content": "some content",
@@ -256,7 +266,7 @@ func TestHandleStoreMemory_TitleExactly100_OK(t *testing.T) {
 func TestHandleStoreMemory_UnicodeTitleRuneCount(t *testing.T) {
 	// 100 multi-byte runes (é is 2 bytes in UTF-8) — must be accepted since
 	// the cap is rune-counted, not byte-counted.
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{
 		"title":   strings.Repeat("é", 100),
 		"content": "some content",
@@ -272,7 +282,7 @@ func TestHandleStoreMemory_UnicodeTitleRuneCount(t *testing.T) {
 }
 
 func TestHandleStoreMemory_MissingContent(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"title": "Some title"})
 
 	result, err := app.handleStoreMemory(context.Background(), req)
@@ -289,7 +299,7 @@ func TestHandleStoreMemory_MissingContent(t *testing.T) {
 func TestHandleSearchMemory_Success(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["x"] = store.Memory{ID: "x", Title: "Standing desk", Content: "standing desk preference"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"query": "standing desk"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -312,7 +322,7 @@ func TestHandleSearchMemory_Success(t *testing.T) {
 func TestHandleSearchMemory_ResultShapeOnlyIDTitleTags(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["x"] = store.Memory{ID: "x", Title: "Title", Content: "some content here", Tags: []string{"a"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"query": "content"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -335,7 +345,7 @@ func TestHandleSearchMemory_TagFilterOnly(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Kubernetes fact", Content: "kubernetes fact", Tags: []string{"kubernetes", "infra"}}
 	ms.memories["b"] = store.Memory{ID: "b", Title: "Go preference", Content: "go preference", Tags: []string{"golang"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"tag_filter": "kubernetes"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -358,7 +368,7 @@ func TestHandleSearchMemory_TagFilterOnly(t *testing.T) {
 func TestHandleSearchMemory_TagFilterIsCaseInsensitive(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Kubernetes fact", Content: "kubernetes fact", Tags: []string{"Kubernetes", "infra"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"tag_filter": "KUBERNETES"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -379,7 +389,7 @@ func TestHandleSearchMemory_TagFilterIsCaseInsensitive(t *testing.T) {
 }
 
 func TestHandleSearchMemory_RequiresQueryOrTagFilter(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{})
 
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -391,12 +401,12 @@ func TestHandleSearchMemory_RequiresQueryOrTagFilter(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_TagFilterOnly_MinScoreProvidedNoError(t *testing.T) {
-	// min_score only has meaning with a query — when tag_filter alone is used,
-	// a provided min_score should simply be ignored, not rejected.
+func TestHandleSearchMemory_TagFilterOnly_StaleArgumentIgnored(t *testing.T) {
+	// min_score was removed from the tool schema. A client still sending it
+	// (an old cached schema, a stale prompt) must be tolerated, not rejected.
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Tagged", Content: "content", Tags: []string{"x"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"tag_filter": "x", "min_score": 0.9})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -404,7 +414,7 @@ func TestHandleSearchMemory_TagFilterOnly_MinScoreProvidedNoError(t *testing.T) 
 		t.Fatal(err)
 	}
 	if result.IsError {
-		t.Fatalf("expected min_score to be harmlessly ignored without a query, got error: %v", result.Content)
+		t.Fatalf("expected a removed argument to be harmlessly ignored, got error: %v", result.Content)
 	}
 }
 
@@ -415,7 +425,7 @@ func TestHandleSearchMemory_ReturnsResults(t *testing.T) {
 			ID: fmt.Sprintf("id-%d", i), Title: "Item", Content: "item",
 		}
 	}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"query": "item"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -433,52 +443,12 @@ func TestHandleSearchMemory_ReturnsResults(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_CustomMinScore(t *testing.T) {
-	var capturedScore float32
-	ms := newMockStore()
-	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
-
-	app := &App{store: &captureSearchArgsStore{mockStore: ms, onSearch: func(s float32, _ int) { capturedScore = s }}}
-
-	minScore := 0.8
-	req := makeRequest(map[string]any{"query": "item", "min_score": minScore})
-	result, err := app.handleSearchMemory(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	if capturedScore != float32(minScore) {
-		t.Errorf("expected min_score %.1f, got %.1f", minScore, capturedScore)
-	}
-}
-
-func TestHandleSearchMemory_DefaultMinScore(t *testing.T) {
-	var capturedScore float32
-	ms := newMockStore()
-	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
-
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(s float32, _ int) { capturedScore = s }}, 0.7, 20)
-	req := makeRequest(map[string]any{"query": "item"})
-	result, err := app.handleSearchMemory(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	if capturedScore != 0.7 {
-		t.Errorf("expected default min_score 0.7, got %.2f", capturedScore)
-	}
-}
-
 func TestHandleSearchMemory_LimitDefault(t *testing.T) {
 	var capturedLimit int
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20, testMaxContentChars)
 	req := makeRequest(map[string]any{"query": "item"})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
@@ -497,7 +467,7 @@ func TestHandleSearchMemory_LimitExplicitZeroMeansUnlimited(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20, testMaxContentChars)
 	limit := 0
 	req := makeRequest(map[string]any{"query": "item", "limit": limit})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -517,7 +487,7 @@ func TestHandleSearchMemory_LimitNegative(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20, testMaxContentChars)
 	limit := -1
 	req := makeRequest(map[string]any{"query": "item", "limit": limit})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -535,7 +505,7 @@ func TestHandleSearchMemory_LimitNegative(t *testing.T) {
 func TestHandleSearchMemory_StoreError(t *testing.T) {
 	ms := newMockStore()
 	ms.searchErr = fmt.Errorf("disk failure")
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"query": "anything"})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -552,7 +522,7 @@ func TestHandleSearchMemory_StoreError(t *testing.T) {
 func TestHandleRetrieveMemory_Success(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", Tags: []string{"t1"}, CreatedAt: "2026-01-01T00:00:00Z"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "a"})
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -576,7 +546,7 @@ func TestHandleRetrieveMemory_ExpandsLinkedSummaries(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", LinkedIDs: []string{"b"}}
 	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "content b", Tags: []string{"tag-b"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "a"})
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -602,7 +572,7 @@ func TestHandleRetrieveMemory_ExpandsLinkedSummaries(t *testing.T) {
 func TestHandleRetrieveMemory_SkipsDanglingLinkGracefully(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", LinkedIDs: []string{"ghost"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "a"})
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -629,7 +599,7 @@ func TestHandleRetrieveMemory_FiltersSelfAndDuplicateLinks(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", LinkedIDs: []string{"a", "b", "b"}}
 	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "content b"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "a"})
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -650,7 +620,7 @@ func TestHandleRetrieveMemory_FiltersSelfAndDuplicateLinks(t *testing.T) {
 }
 
 func TestHandleRetrieveMemory_NotFound(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"memory_id": "ghost"})
 
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -663,7 +633,7 @@ func TestHandleRetrieveMemory_NotFound(t *testing.T) {
 }
 
 func TestHandleRetrieveMemory_MissingID(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{})
 
 	result, err := app.handleRetrieveMemory(context.Background(), req)
@@ -680,7 +650,7 @@ func TestHandleRetrieveMemory_MissingID(t *testing.T) {
 func TestHandleDeleteMemory_Success(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["del-id"] = store.Memory{ID: "del-id", Title: "Delete me", Content: "delete me"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "del-id"})
 	result, err := app.handleDeleteMemory(context.Background(), req)
@@ -696,7 +666,7 @@ func TestHandleDeleteMemory_Success(t *testing.T) {
 }
 
 func TestHandleDeleteMemory_MissingID(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{})
 
 	result, err := app.handleDeleteMemory(context.Background(), req)
@@ -709,7 +679,7 @@ func TestHandleDeleteMemory_MissingID(t *testing.T) {
 }
 
 func TestHandleDeleteMemory_StoreError(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"memory_id": "nonexistent"})
 
 	result, err := app.handleDeleteMemory(context.Background(), req)
@@ -726,7 +696,7 @@ func TestHandleDeleteMemory_StoreError(t *testing.T) {
 func TestHandleUpdateMemory_ContentOnly(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "old content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id", "content": "new content"})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -747,7 +717,7 @@ func TestHandleUpdateMemory_ContentOnly(t *testing.T) {
 func TestHandleUpdateMemory_TitleOnly(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Old title", Content: "content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id", "title": "New title"})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -768,7 +738,7 @@ func TestHandleUpdateMemory_TitleOnly(t *testing.T) {
 func TestHandleUpdateMemory_TagsOnlyPatch(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"old"}}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id", "tags": []any{"new"}})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -787,7 +757,7 @@ func TestHandleUpdateMemory_LinkedIDsOnlyPatch(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a"}
 	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "b"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "a", "linked_ids": []any{"b"}})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -805,7 +775,7 @@ func TestHandleUpdateMemory_LinkedIDsOnlyPatch(t *testing.T) {
 func TestHandleUpdateMemory_RequiresAtLeastOneField(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id"})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -820,7 +790,7 @@ func TestHandleUpdateMemory_RequiresAtLeastOneField(t *testing.T) {
 func TestHandleUpdateMemory_TitlePatchValidatesLength(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id", "title": strings.Repeat("x", 101)})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -835,7 +805,7 @@ func TestHandleUpdateMemory_TitlePatchValidatesLength(t *testing.T) {
 func TestHandleUpdateMemory_EmptyContentRejected(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content"}
-	app := &App{store: ms}
+	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{"memory_id": "upd-id", "content": ""})
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -848,7 +818,7 @@ func TestHandleUpdateMemory_EmptyContentRejected(t *testing.T) {
 }
 
 func TestHandleUpdateMemory_NotFound(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"memory_id": "ghost", "content": "new"})
 
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -861,7 +831,7 @@ func TestHandleUpdateMemory_NotFound(t *testing.T) {
 }
 
 func TestHandleUpdateMemory_MissingID(t *testing.T) {
-	app := &App{store: newMockStore()}
+	app := newTestApp(newMockStore())
 	req := makeRequest(map[string]any{"content": "new"})
 
 	result, err := app.handleUpdateMemory(context.Background(), req)
@@ -884,4 +854,77 @@ func resultText(t *testing.T, result *mcp.CallToolResult) string {
 		t.Fatalf("expected TextContent, got %T", result.Content[0])
 	}
 	return tc.Text
+}
+
+func TestHandleStoreMemory_ContentSizeLimit(t *testing.T) {
+	app := NewApp(newMockStore(), 20, 100)
+
+	ok := makeRequest(map[string]any{"title": "T", "content": strings.Repeat("a", 100)})
+	result, err := app.handleStoreMemory(context.Background(), ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Errorf("content exactly at the limit should be accepted, got: %v", result.Content)
+	}
+
+	over := makeRequest(map[string]any{"title": "T", "content": strings.Repeat("a", 101)})
+	result, err = app.handleStoreMemory(context.Background(), over)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected content over the limit to be rejected")
+	}
+	if msg := resultText(t, result); !strings.Contains(msg, "max_content_chars") {
+		t.Errorf("expected the error to name the config knob so it is actionable, got: %s", msg)
+	}
+}
+
+func TestHandleStoreMemory_ContentLimitCountsRunesNotBytes(t *testing.T) {
+	// A multi-byte character must count as one, matching how the title cap
+	// behaves — otherwise a limit of 100 would reject ~34 emoji.
+	app := NewApp(newMockStore(), 20, 100)
+
+	req := makeRequest(map[string]any{"title": "T", "content": strings.Repeat("é", 100)})
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Errorf("100 multi-byte characters should fit a 100 character limit, got: %v", result.Content)
+	}
+}
+
+func TestHandleUpdateMemory_ContentSizeLimit(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "T", Content: "original"}
+	app := NewApp(ms, 20, 100)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "content": strings.Repeat("a", 101)})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected update to enforce the same content limit as store")
+	}
+	if ms.memories["a"].Content != "original" {
+		t.Error("a rejected update must not have modified the memory")
+	}
+}
+
+func TestHandleUpdateMemory_EmptyContentStillRejected(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "T", Content: "original"}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "content": ""})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected empty content to remain rejected")
+	}
 }

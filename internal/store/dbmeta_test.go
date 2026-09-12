@@ -5,22 +5,20 @@ import (
 	"strings"
 	"testing"
 
-	chromem "github.com/philippgille/chromem-go"
-
 	"github.com/AWDDude/engRam/internal/config"
 )
 
-func TestModelCollectionPath_Sanitizes(t *testing.T) {
-	got := modelCollectionPath("/db", "KnightsAnalytics/all-MiniLM-L6-v2")
-	want := "/db/KnightsAnalytics_all-MiniLM-L6-v2"
+func TestModelDBPath_Sanitizes(t *testing.T) {
+	got := modelDBPath("/db", "KnightsAnalytics/all-MiniLM-L6-v2")
+	want := "/db/KnightsAnalytics_all-MiniLM-L6-v2.db"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestModelCollectionPath_NoSlash(t *testing.T) {
-	got := modelCollectionPath("/db", "simple-model")
-	want := "/db/simple-model"
+func TestModelDBPath_NoSlash(t *testing.T) {
+	got := modelDBPath("/db", "simple-model")
+	want := "/db/simple-model.db"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -67,8 +65,7 @@ func TestModelChangedError_Message(t *testing.T) {
 	}
 }
 
-
-func TestNewChromemStore_ModelMismatch(t *testing.T) {
+func TestNewBoltStore_ModelMismatch(t *testing.T) {
 	dir := t.TempDir()
 
 	if err := saveDBMeta(dir, dbMeta{ActiveModel: "model-a"}); err != nil {
@@ -80,7 +77,7 @@ func TestNewChromemStore_ModelMismatch(t *testing.T) {
 		Model: config.ModelConfig{EmbeddingModel: "model-b"},
 	}
 
-	_, _, err := NewChromemStore(cfg)
+	_, _, err := NewBoltStore(cfg)
 	if err == nil {
 		t.Fatal("expected ModelChangedError, got nil")
 	}
@@ -97,7 +94,7 @@ func TestNewChromemStore_ModelMismatch(t *testing.T) {
 	}
 }
 
-func TestNewChromemStore_FirstRun_WritesDBMeta(t *testing.T) {
+func TestNewBoltStore_FirstRun_WritesDBMeta(t *testing.T) {
 	dir := t.TempDir()
 
 	cfg := config.Config{
@@ -105,9 +102,9 @@ func TestNewChromemStore_FirstRun_WritesDBMeta(t *testing.T) {
 		Model: config.ModelConfig{EmbeddingModel: "test-model"},
 	}
 
-	// NewChromemStore will fail at the embedding step (no model downloaded),
+	// NewBoltStore will fail at the embedding step (no model downloaded),
 	// but db_meta.json is written before that — verify the side effect.
-	_, _, _ = NewChromemStore(cfg)
+	_, _, _ = NewBoltStore(cfg)
 
 	meta, err := loadDBMeta(dir)
 	if err != nil {
@@ -118,12 +115,11 @@ func TestNewChromemStore_FirstRun_WritesDBMeta(t *testing.T) {
 	}
 }
 
-
 // Ensure ModelChangedError satisfies the error interface for errors.As.
 func TestModelChangedError_As(t *testing.T) {
 	original := &ModelChangedError{OldModel: "a", NewModel: "b"}
 	wrapped := errors.New("wrapped: " + original.Error())
-	_ = wrapped // just confirm it compiles; errors.As is tested in TestNewChromemStore_ModelMismatch
+	_ = wrapped // just confirm it compiles; errors.As is tested in TestNewBoltStore_ModelMismatch
 
 	var target *ModelChangedError
 	if !errors.As(original, &target) {
@@ -132,14 +128,17 @@ func TestModelChangedError_As(t *testing.T) {
 }
 
 // testNewStoreWithModel creates a test store using a specific model name.
-func testNewStoreWithModel(t *testing.T, dbPath, model string) Store {
+// It returns the concrete type so callers can Close it: bbolt holds an
+// exclusive file lock, so a test that reopens the same database (reembed)
+// must release it first.
+func testNewStoreWithModel(t *testing.T, dbPath, model string) *boltStore {
 	t.Helper()
-	s, err := newChromemStoreWithEmb(
+	s, err := newBoltStoreWithEmb(
 		config.Config{
 			DB:    config.DBConfig{Path: dbPath},
 			Model: config.ModelConfig{EmbeddingModel: model},
 		},
-		chromem.EmbeddingFunc(testEmbedFunc),
+		EmbeddingFunc(testEmbedFunc),
 	)
 	if err != nil {
 		t.Fatalf("creating test store: %v", err)

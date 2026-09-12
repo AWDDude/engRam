@@ -16,6 +16,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # GoReleaser has no notion of branches — it releases whatever commit is
+      # tagged. Restricting releases to main therefore has to happen here, and
+      # has to happen before goreleaser runs, so a bad tag fails without
+      # publishing a GitHub release or updating the Homebrew tap.
+      - name: Verify the tag is on main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main."
+            echo "Releases are cut from main only. Merge the branch first, then tag the merge commit:"
+            echo "  git checkout main && git pull"
+            echo "  git tag -a $GITHUB_REF_NAME -m $GITHUB_REF_NAME && git push origin $GITHUB_REF_NAME"
+            echo "Then delete the bad tag: git push --delete origin $GITHUB_REF_NAME"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME ($GITHUB_SHA) is on main — proceeding."
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

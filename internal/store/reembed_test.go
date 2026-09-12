@@ -6,8 +6,6 @@ import (
 	"os"
 	"testing"
 
-	chromem "github.com/philippgille/chromem-go"
-
 	"github.com/AWDDude/engRam/internal/config"
 )
 
@@ -18,7 +16,7 @@ func TestReembedWithEmb_NoExistingDB(t *testing.T) {
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
 
-	_, err := reembedWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	_, err := reembedWithEmb(context.Background(), cfg, EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err == nil {
 		t.Error("expected error when no db_meta.json found")
 	}
@@ -34,7 +32,7 @@ func TestReembedWithEmb_SameModel(t *testing.T) {
 		Model: config.ModelConfig{EmbeddingModel: "same-model"},
 	}
 
-	_, err := reembedWithEmb(context.Background(), cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	_, err := reembedWithEmb(context.Background(), cfg, EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err == nil {
 		t.Error("expected error when model is already the same")
 	}
@@ -59,12 +57,19 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Release the exclusive bolt file lock: reembed reopens this database,
+	// and in production it runs as its own CLI invocation with nothing else
+	// holding the file.
+	if err := oldStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	// Run re-embedding
 	cfg := config.Config{
 		DB:    config.DBConfig{Path: dir},
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
-	n, err := reembedWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard)
+	n, err := reembedWithEmb(ctx, cfg, EmbeddingFunc(testEmbedFunc), io.Discard)
 	if err != nil {
 		t.Fatalf("reembedWithEmb: %v", err)
 	}
@@ -81,10 +86,10 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 		t.Errorf("expected active model 'new-model', got %q", meta.ActiveModel)
 	}
 
-	// Old collection directory is removed
-	oldCollPath := modelCollectionPath(dir, "old-model")
-	if _, err := os.Stat(oldCollPath); !os.IsNotExist(err) {
-		t.Error("expected old collection directory to be removed")
+	// Old model's database file is removed
+	oldDBPath := modelDBPath(dir, "old-model")
+	if _, err := os.Stat(oldDBPath); !os.IsNotExist(err) {
+		t.Error("expected old model's database file to be removed")
 	}
 
 	// New collection has both memories with original IDs preserved
@@ -94,7 +99,7 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 			t.Errorf("memory %s not found in new store: %v", id, err)
 		}
 	}
-	results, err := newStore.Search(ctx, "", "", 0, 0)
+	results, err := newStore.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,11 +135,18 @@ func TestReembedWithEmb_PreservesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Release the exclusive bolt file lock: reembed reopens this database,
+	// and in production it runs as its own CLI invocation with nothing else
+	// holding the file.
+	if err := oldStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := config.Config{
 		DB:    config.DBConfig{Path: dir},
 		Model: config.ModelConfig{EmbeddingModel: "new-model"},
 	}
-	if _, err := reembedWithEmb(ctx, cfg, chromem.EmbeddingFunc(testEmbedFunc), io.Discard); err != nil {
+	if _, err := reembedWithEmb(ctx, cfg, EmbeddingFunc(testEmbedFunc), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 

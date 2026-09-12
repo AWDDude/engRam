@@ -17,13 +17,30 @@ const titleMaxLen = 100
 // App holds shared dependencies for all tool handlers.
 type App struct {
 	store           store.Store
-	defaultMinScore float32
 	defaultLimit    int
+	maxContentChars int
 }
 
 // NewApp constructs an App with the given store and default search settings.
-func NewApp(s store.Store, defaultMinScore float32, defaultLimit int) *App {
-	return &App{store: s, defaultMinScore: defaultMinScore, defaultLimit: defaultLimit}
+func NewApp(s store.Store, defaultLimit, maxContentChars int) *App {
+	return &App{store: s, defaultLimit: defaultLimit, maxContentChars: maxContentChars}
+}
+
+// validateContent enforces the required, non-empty, size-capped rule shared by
+// store (always) and update (when content is patched at all). The cap is a
+// guardrail against pasted logs and whole documents: oversized content is
+// chunked rather than rejected by the model, so the cost is a slow embed and a
+// vaguer vector rather than a failure, which makes it worth catching here.
+func (a *App) validateContent(content string) error {
+	if content == "" {
+		return fmt.Errorf("content is required")
+	}
+	if n := utf8.RuneCountInString(content); n > a.maxContentChars {
+		return fmt.Errorf("content exceeds the %d character limit (got %d) — "+
+			"split it into separate linked memories, or raise max_content_chars in the config",
+			a.maxContentChars, n)
+	}
+	return nil
 }
 
 // validateTitle enforces the required, non-empty, <=titleMaxLen-character rule
@@ -49,10 +66,9 @@ type storeMemoryArgs struct {
 }
 
 type searchMemoryArgs struct {
-	Query     string   `json:"query"`
-	TagFilter string   `json:"tag_filter"`
-	MinScore  *float64 `json:"min_score"`
-	Limit     *int     `json:"limit"`
+	Query     string `json:"query"`
+	TagFilter string `json:"tag_filter"`
+	Limit     *int   `json:"limit"`
 }
 
 type retrieveMemoryArgs struct {
@@ -79,8 +95,8 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 	if err := validateTitle(args.Title); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if args.Content == "" {
-		return mcp.NewToolResultError("content is required"), nil
+	if err := a.validateContent(args.Content); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	id, err := a.store.Add(ctx, args.Title, args.Content, args.Tags, args.LinkedIDs)
@@ -105,16 +121,12 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("at least one of query or tag_filter is required"), nil
 	}
 
-	minScore := a.defaultMinScore
-	if args.MinScore != nil {
-		minScore = float32(*args.MinScore)
-	}
 	limit := a.defaultLimit
 	if args.Limit != nil {
 		limit = *args.Limit
 	}
 
-	results, err := a.store.Search(ctx, args.Query, args.TagFilter, minScore, limit)
+	results, err := a.store.Search(ctx, args.Query, args.TagFilter, limit)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}
@@ -208,8 +220,10 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 	}
-	if args.Content != nil && *args.Content == "" {
-		return mcp.NewToolResultError("content cannot be empty"), nil
+	if args.Content != nil {
+		if err := a.validateContent(*args.Content); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 
 	patch := store.MemoryUpdate{

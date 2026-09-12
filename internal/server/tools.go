@@ -1,9 +1,45 @@
 package server
 
 import (
+	"fmt"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
+
+// contentDescription documents the content argument's size cap, shared by
+// store (required) and update (optional) since both enforce the same limit
+// via App.validateContent.
+func contentDescription(lead string, maxContentChars int) string {
+	return fmt.Sprintf(
+		"%s (max %d characters). Longer material belongs in "+
+			"several linked memories rather than one: a memory past this size is "+
+			"split into chunks and its embedding gets vaguer, making it harder to "+
+			"retrieve, not easier.", lead, maxContentChars)
+}
+
+// searchLimitDescription documents the limit argument, naming the actual
+// configured default rather than an abstract "the default".
+//
+// Two things are easy to get backwards and so are stated outright: omitting
+// the argument is the capped option while 0 is the uncapped one (the reverse
+// of the usual "leave it blank for everything" convention), and a short result
+// list is expected rather than a sign the limit was too low, since weak
+// matches are dropped by relevance before the limit is ever applied.
+func searchLimitDescription(defaultLimit int) string {
+	capped := fmt.Sprintf("%d", defaultLimit)
+	if defaultLimit <= 0 {
+		capped = "no cap, as configured"
+	}
+	return fmt.Sprintf(
+		"Maximum results to return. Omit to use the configured default (%s). "+
+			"Pass 0 to remove the cap and return every match; negative values behave the same as 0. "+
+			"Note that omitting this argument is the capped option and 0 is the uncapped one. "+
+			"Getting back fewer results than the limit is normal and does not mean the limit was too low: "+
+			"low-relevance matches are dropped before the limit is applied, so raising it will not surface them.",
+		capped,
+	)
+}
 
 // RegisterTools registers all MCP tools on the given server.
 func RegisterTools(s *mcpserver.MCPServer, app *App) {
@@ -16,7 +52,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 			),
 			mcp.WithString("content",
 				mcp.Required(),
-				mcp.Description("The content to store"),
+				mcp.Description(contentDescription("The content to store", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
 				mcp.Description("Optional tags for categorization"),
@@ -32,18 +68,15 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("search",
-			mcp.WithDescription("Search stored memories by semantic query and/or tag filter. At least one of query or tag_filter is required. Returns only id, title, and tags for each match — use retrieve for full details."),
+			mcp.WithDescription("Search stored memories by hybrid semantic + keyword query and/or tag filter. At least one of query or tag_filter is required. Results are ranked by relevance. Returns only id, title, and tags for each match — use retrieve for full details."),
 			mcp.WithString("query",
-				mcp.Description("Semantic search query (matches title and content)"),
+				mcp.Description("Search query (matches title and content, both semantically and by keyword)"),
 			),
 			mcp.WithString("tag_filter",
 				mcp.Description("Filter by tag (case-insensitive substring match)"),
 			),
-			mcp.WithNumber("min_score",
-				mcp.Description("Minimum cosine similarity threshold (0–1); only applies when query is given; overrides the configured default"),
-			),
 			mcp.WithInteger("limit",
-				mcp.Description("Maximum results to return (omitted = configured default; 0 or negative = unlimited)"),
+				mcp.Description(searchLimitDescription(app.defaultLimit)),
 			),
 		),
 		app.handleSearchMemory,
@@ -82,7 +115,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("New title (max 100 characters)"),
 			),
 			mcp.WithString("content",
-				mcp.Description("New content"),
+				mcp.Description(contentDescription("New content", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
 				mcp.Description("New tags (replaces the existing set)"),

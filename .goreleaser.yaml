@@ -18,7 +18,10 @@ builds:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w
+      # -X overrides the constant in cmd/engram/version.go so a published
+      # binary always reports the tag it was built from, not whatever the
+      # source happened to say.
+      - -s -w -X main.version={{ .Version }}
 
 archives:
   - formats: [tar.gz]

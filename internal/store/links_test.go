@@ -1,11 +1,99 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+
+	bolt "go.etcd.io/bbolt"
 )
+
+// TestSyncLinks_RejectedUpdateMutatesNothing is the invariant the bolt
+// migration exists to guarantee. Link syncing touches several records at once;
+// if validation fails partway, neither the durable store nor the in-memory
+// index may retain any part of the batch. Under the old JSON sidecar this was
+// upheld by a "mutate, then remember to save once" convention; here it falls
+// out of the write landing in a single transaction.
+func TestSyncLinks_RejectedUpdateMutatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cs := s.(*boltStore)
+
+	aID, _ := s.Add(ctx, "A", "a", nil, nil)
+	bID, _ := s.Add(ctx, "B", "b", nil, []string{aID})
+	cID, _ := s.Add(ctx, "C", "c", nil, nil)
+
+	// Link A to C *and* to an id that doesn't exist. C is valid and is
+	// processed first, so a non-atomic implementation would leave C linked to
+	// A even though the operation as a whole failed.
+	bad := []string{cID, "does-not-exist"}
+	if err := s.Update(ctx, aID, MemoryUpdate{LinkedIDs: &bad}); err == nil {
+		t.Fatal("expected an error when linking to a nonexistent memory")
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(a.LinkedIDs, cID) {
+		t.Errorf("A must not be linked to C after a rejected update, got %v", a.LinkedIDs)
+	}
+	if !containsID(a.LinkedIDs, bID) {
+		t.Errorf("A's pre-existing link to B must survive a rejected update, got %v", a.LinkedIDs)
+	}
+	c, err := s.GetByID(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(c.LinkedIDs, aID) {
+		t.Errorf("C must not have been half-linked to A, got %v", c.LinkedIDs)
+	}
+
+	// The durable copy must agree with the in-memory index.
+	if stored := storedMemory(t, cs, cID); containsID(stored.LinkedIDs, aID) {
+		t.Errorf("persisted C must not be linked to A, got %v", stored.LinkedIDs)
+	}
+	if stored := storedMemory(t, cs, aID); containsID(stored.LinkedIDs, cID) {
+		t.Errorf("persisted A must not be linked to C, got %v", stored.LinkedIDs)
+	}
+}
+
+// storedMemory reads a memory back out of bolt rather than the in-memory
+// index, so a test can assert what actually got persisted.
+func storedMemory(t *testing.T, s *boltStore, id string) Memory {
+	t.Helper()
+	var mem Memory
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(bucketMemories).Get([]byte(id))
+		if raw == nil {
+			return fmt.Errorf("no record stored for %s", id)
+		}
+		return json.Unmarshal(raw, &mem)
+	}); err != nil {
+		t.Fatalf("reading stored memory %s: %v", id, err)
+	}
+	return mem
+}
+
+// rawVectorBlob reads a memory's stored vector bytes straight out of bolt, so
+// a test can assert whether an update re-embedded or left the vectors alone.
+func rawVectorBlob(t *testing.T, s *boltStore, id string) []byte {
+	t.Helper()
+	var out []byte
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		out = append([]byte(nil), tx.Bucket(bucketVectors).Get([]byte(id))...)
+		return nil
+	}); err != nil {
+		t.Fatalf("reading vector blob for %s: %v", id, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no vectors stored for %s", id)
+	}
+	return out
+}
 
 func containsID(ids []string, id string) bool {
 	for _, x := range ids {
@@ -182,24 +270,41 @@ func TestLinks_UpdateReplaceLinks_AddAndRemoveInOneCall(t *testing.T) {
 	}
 }
 
-func TestLinks_UpdateLinksOnly_DoesNotTouchChromemDocs(t *testing.T) {
+func TestLinks_UpdateLinksOnly_DoesNotReembed(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	cs := s.(*chromemStore)
+	cs := s.(*boltStore)
 
 	aID, _ := s.Add(ctx, "A", "a content", nil, nil)
 	bID, _ := s.Add(ctx, "B", "b content", nil, nil)
 
-	before := cs.col.Count()
+	before := rawVectorBlob(t, cs, aID)
 
 	newLinks := []string{bID}
 	if err := s.Update(ctx, aID, MemoryUpdate{LinkedIDs: &newLinks}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
-	after := cs.col.Count()
-	if after != before {
-		t.Errorf("expected chromem doc count unchanged by a links-only update, before=%d after=%d", before, after)
+	if after := rawVectorBlob(t, cs, aID); !bytes.Equal(before, after) {
+		t.Error("expected the stored vector blob to be untouched by a links-only update")
+	}
+}
+
+func TestLinks_UpdateTagsOnly_DoesNotReembed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cs := s.(*boltStore)
+
+	aID, _ := s.Add(ctx, "A", "a content", nil, nil)
+	before := rawVectorBlob(t, cs, aID)
+
+	newTags := []string{"fresh", "tags"}
+	if err := s.Update(ctx, aID, MemoryUpdate{Tags: &newTags}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if after := rawVectorBlob(t, cs, aID); !bytes.Equal(before, after) {
+		t.Error("expected the stored vector blob to be untouched by a tags-only update")
 	}
 }
 
@@ -235,7 +340,7 @@ func TestLinks_UpdateContentAlso_TriggersReembed(t *testing.T) {
 	}
 
 	// Confirm it's actually searchable under the new content.
-	results, err := s.Search(ctx, "brand new content", "", 0, 0)
+	results, err := s.Search(ctx, "brand new content", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,12 +745,10 @@ func TestLinks_ConcurrentTagsUpdateDoesNotClobberConcurrentLink(t *testing.T) {
 
 // TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink is the same
 // regression as above but for Update's re-embed branch (content changed),
-// which persists via a separate write path. Only one pair is used (unlike
-// the tags-only version above): running several content re-embeds
-// concurrently would race each other inside chromem-go's own collection
-// locking (a pre-existing issue in that dependency, unrelated to this bug),
-// which a single content-update goroutine paired with a links-only goroutine
-// (no chromem-go collection access) avoids.
+// which re-embeds before taking the lock. Only one pair is used (unlike the
+// tags-only version above) to keep the test fast: each content update costs a
+// real embedding pass, and the invariant under test is about one re-embed
+// racing one link change, not about embedding throughput.
 func TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -683,20 +786,46 @@ func TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink(t *testing.T)
 	}
 }
 
-// TestCascadeUnlink_DoubleCallIsIdempotent guards against a regression where
-// cascadeUnlink errored on an already-removed id instead of no-op'ing,
-// breaking Delete's idempotency under a concurrent double-delete.
-func TestCascadeUnlink_DoubleCallIsIdempotent(t *testing.T) {
+// TestDelete_ConcurrentDoubleDeleteIsSafe guards the property the old
+// cascadeUnlink no-op was defending: two racing deletes of the same id must
+// not corrupt the store. Delete now holds the write lock across both the
+// existence check and the transaction, so exactly one caller wins and the
+// loser gets a clean not-found rather than double-unlinking peers.
+func TestDelete_ConcurrentDoubleDeleteIsSafe(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	cs := s.(*chromemStore)
 
 	aID, _ := s.Add(ctx, "A", "a", nil, nil)
+	bID, _ := s.Add(ctx, "B", "b", nil, []string{aID})
 
-	if err := cs.cascadeUnlink(aID); err != nil {
-		t.Fatalf("first cascadeUnlink: %v", err)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(len(errs))
+	for i := range errs {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.Delete(ctx, aID)
+		}(i)
 	}
-	if err := cs.cascadeUnlink(aID); err != nil {
-		t.Errorf("second cascadeUnlink on an already-removed id should be a no-op, got error: %v", err)
+	wg.Wait()
+
+	var succeeded int
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Errorf("expected exactly one delete to succeed, got %d (errs: %v)", succeeded, errs)
+	}
+	if _, err := s.GetByID(ctx, aID); err == nil {
+		t.Error("expected A to be gone after delete")
+	}
+	b, err := s.GetByID(ctx, bID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(b.LinkedIDs, aID) {
+		t.Errorf("expected B's link to the deleted A to be cleaned up, got %v", b.LinkedIDs)
 	}
 }
