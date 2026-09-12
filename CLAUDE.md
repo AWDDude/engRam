@@ -27,6 +27,16 @@ Version lives in `cmd/engram/version.go` as a `var` that goreleaser overrides
 via `-X main.version={{ .Version }}`, so published binaries report their tag
 and source builds report the next intended release.
 
+## Releasing
+
+Releases are cut from `main` only. A `v*` tag push runs
+`.github/workflows/release.yml`, which asserts the tagged commit is an ancestor
+of `origin/main` before GoReleaser runs — tagging a feature branch fails the
+workflow rather than publishing a release and updating the Homebrew tap.
+GoReleaser has no branch concept, so the check lives in the workflow, not in
+`.goreleaser.yaml`. Widen it if a maintenance branch (e.g. `v1.x`) ever needs
+to ship releases.
+
 ## Config
 
 Config file location (or override with `ENGRAM_CONFIG_PATH`):

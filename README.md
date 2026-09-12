@@ -190,6 +190,32 @@ make clean   # remove binary
 
 Tests use an in-memory store with a deterministic mock embedding function — no model download required.
 
+### Releasing
+
+Releases are cut from `main` only. Pushing a `v*` tag triggers
+`.github/workflows/release.yml`, which verifies the tagged commit is an
+ancestor of `origin/main` before running GoReleaser — a tag on a feature
+branch fails the workflow instead of publishing a release and updating the
+Homebrew tap. GoReleaser itself has no concept of branches, so this check
+lives in the workflow rather than in `.goreleaser.yaml`.
+
+```bash
+git checkout main && git pull
+git tag -a v2.0.0 -m v2.0.0
+git push origin v2.0.0
+```
+
+If you tag the wrong commit, delete the tag before retagging:
+
+```bash
+git push --delete origin v2.0.0
+```
+
+The version reported by `engram version` comes from the tag: GoReleaser
+injects it with `-X main.version={{ .Version }}`. The constant in
+`cmd/engram/version.go` is only what local source builds report, and should
+name the next intended release.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
