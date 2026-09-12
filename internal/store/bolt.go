@@ -42,7 +42,36 @@ type boltStore struct {
 	mu   sync.RWMutex
 	docs map[string]Memory      // memory ID -> record
 	vecs map[string][][]float32 // memory ID -> one vector per content chunk
+	bm25 *bm25Index             // lexical index, rebuilt at open, never persisted
 }
+
+const (
+	// denseCandidateBand keeps dense hits scoring at least this fraction of
+	// the best hit. Relative rather than absolute so there is no similarity
+	// threshold to tune: when one memory clearly wins, the mediocre tail is
+	// dropped; when everything scores alike there is nothing to distinguish
+	// and all of it stays.
+	denseCandidateBand = 0.75
+
+	// sparseCandidateBand does the same for the lexical leg. It matters most
+	// for queries containing a common term: "david" appears in most memories
+	// and scores them all, and since RRF weighs rank rather than score, those
+	// incidental hits would otherwise crowd out the memory that matched on
+	// something distinctive. BM25 scores spread much wider than cosines, so
+	// the band can be looser than the dense one.
+	sparseCandidateBand = 0.4
+
+	// rrfRelativeCutoff drops fused results far below the top hit. RRF scores
+	// occupy a narrow band (every rank is 1/(60+r)), so the dominant signal is
+	// whether a memory surfaced in both legs — roughly doubling its score.
+	// At 0.5 a both-legs winner cuts the single-leg tail, while a field where
+	// everything scored alike is left intact.
+	//
+	// This is a secondary filter: the dense leg's own band (above) does most
+	// of the work, since real embeddings spread unrelated text far below a
+	// genuine match.
+	rrfRelativeCutoff = 0.5
+)
 
 // NewBoltStore creates a production store backed by hugot (GoMLX) for embeddings.
 // The second return value is a cleanup func that must be called when the process
@@ -96,6 +125,7 @@ func newBoltStoreWithEmb(cfg config.Config, embed EmbeddingFunc) (*boltStore, er
 		embed: embed,
 		docs:  make(map[string]Memory),
 		vecs:  make(map[string][][]float32),
+		bm25:  newBM25Index(),
 	}
 	if err := s.load(); err != nil {
 		_ = db.Close()
@@ -121,6 +151,7 @@ func (s *boltStore) load() error {
 				return fmt.Errorf("parsing memory %s: %w", k, err)
 			}
 			s.docs[mem.ID] = mem
+			s.bm25.set(mem.ID, mem.Title, mem.Content, mem.Tags)
 			return nil
 		}); err != nil {
 			return err
@@ -208,12 +239,17 @@ func (s *boltStore) commit(changes []change) error {
 		if c.remove {
 			delete(s.docs, c.mem.ID)
 			delete(s.vecs, c.mem.ID)
+			s.bm25.remove(c.mem.ID)
 			continue
 		}
 		s.docs[c.mem.ID] = c.mem
 		if c.vectors != nil {
 			s.vecs[c.mem.ID] = c.vectors
 		}
+		// Re-index unconditionally: link- and tag-only changes re-index the
+		// same text, which is cheap and keeps this the single place the
+		// lexical index can drift from the records.
+		s.bm25.set(c.mem.ID, c.mem.Title, c.mem.Content, c.mem.Tags)
 	}
 	return nil
 }
@@ -282,18 +318,23 @@ func (s *boltStore) embedChunks(ctx context.Context, title, content string) ([][
 	return out, nil
 }
 
-// Search performs a semantic query, a tag filter, or both. query == ""
-// switches to a tag-only scan — callers outside the MCP layer (export,
-// reembed) may also pass both query and tagFilter empty to mean "everything";
-// the "at least one required" rule is enforced by the MCP handler, not here.
-// limit <= 0 means unlimited.
-func (s *boltStore) Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]SearchResult, error) {
+// Search runs a hybrid query: dense vector similarity and lexical BM25 in
+// parallel, fused by Reciprocal Rank Fusion. The lexical leg is what finds a
+// half-remembered exact token — an identifier, an error string, a name — which
+// is the case dense embeddings are worst at.
+//
+// query == "" switches to a tag-only scan — callers outside the MCP layer
+// (export, reembed) may also pass both query and tagFilter empty to mean
+// "everything"; the "at least one required" rule is enforced by the MCP
+// handler, not here. limit <= 0 means unlimited.
+func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error) {
 	if query == "" {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 		return toSearchResults(s.listLocked(tagFilter, limit)), nil
 	}
 
+	// Embedding is slow and needs no lock; do it before taking one.
 	qv, err := s.embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embedding query: %w", err)
@@ -302,11 +343,31 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, minScor
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	type entry struct {
-		mem   Memory
-		score float32
+	fused := rrf(
+		rankedIDs(s.denseScoresLocked(qv, tagFilter)),
+		rankedIDs(s.sparseScoresLocked(query, tagFilter)),
+	)
+
+	ranked := applyRelativeCutoff(rankedIDs(fused), fused, rrfRelativeCutoff)
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
 	}
-	ordered := make([]entry, 0, len(s.docs))
+
+	out := make([]SearchResult, 0, len(ranked))
+	for _, id := range ranked {
+		mem := s.docs[id]
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+	}
+	return out, nil
+}
+
+// denseScoresLocked scores every memory by its best-matching chunk, then keeps
+// only those within denseCandidateBand of the best. Unlike the lexical leg,
+// cosine similarity ranks every document in the corpus, so without this the
+// dense leg would contribute a long tail of noise to the fusion.
+// Callers must hold s.mu.
+func (s *boltStore) denseScoresLocked(qv []float32, tagFilter string) map[string]float64 {
+	scores := make(map[string]float64, len(s.vecs))
 	for id, chunks := range s.vecs {
 		mem, ok := s.docs[id]
 		if !ok {
@@ -315,34 +376,28 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, minScor
 		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
 			continue
 		}
-		// A memory scores as its best-matching chunk.
-		best := float32(-1)
+		var top float32 = -1
 		for _, cv := range chunks {
-			if sc := cosine(qv, cv); sc > best {
-				best = sc
+			if sc := cosine(qv, cv); sc > top {
+				top = sc
 			}
 		}
-		if best < minScore {
-			continue
-		}
-		ordered = append(ordered, entry{mem: mem, score: best})
+		scores[id] = float64(top)
 	}
+	return keepWithinBand(scores, denseCandidateBand)
+}
 
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].score != ordered[j].score {
-			return ordered[i].score > ordered[j].score
+// sparseScoresLocked runs the BM25 query and applies the tag filter.
+// Callers must hold s.mu.
+func (s *boltStore) sparseScoresLocked(query, tagFilter string) map[string]float64 {
+	scores := s.bm25.score(query)
+	for id := range scores {
+		mem, ok := s.docs[id]
+		if !ok || (tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter)) {
+			delete(scores, id)
 		}
-		return ordered[i].mem.ID < ordered[j].mem.ID // stable tiebreak
-	})
-	if limit > 0 && len(ordered) > limit {
-		ordered = ordered[:limit]
 	}
-
-	out := make([]SearchResult, 0, len(ordered))
-	for _, e := range ordered {
-		out = append(out, SearchResult{ID: e.mem.ID, Title: e.mem.Title, Tags: e.mem.Tags})
-	}
-	return out, nil
+	return keepWithinBand(scores, sparseCandidateBand)
 }
 
 // listLocked returns matching memories newest-first. Callers must hold s.mu.

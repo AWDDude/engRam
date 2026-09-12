@@ -178,7 +178,7 @@ func TestImportStore_BlankIDGeneratesNewOne(t *testing.T) {
 		t.Errorf("expected 1 memory imported, got %d", n)
 	}
 
-	results, err := s.Search(ctx, "", "", 0, 0)
+	results, err := s.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

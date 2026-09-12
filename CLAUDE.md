@@ -4,7 +4,8 @@ MCP server for long-term semantic memory. Single statically-linked Go binary.
 
 ## Stack
 
-- **Vector store**: chromem-go (embedded, persistent, file-based)
+- **Storage**: bbolt (embedded, single file, ACID transactions) — records, vectors, and links in one database
+- **Retrieval**: hybrid — brute-force cosine over stored vectors + in-memory BM25, fused by Reciprocal Rank Fusion
 - **Embeddings**: hugot + GoMLX simplego backend (`KnightsAnalytics/all-MiniLM-L6-v2`, downloaded once from Hugging Face, no external service)
 - **MCP transport**: stdio (mark3labs/mcp-go v0.50.0)
 
@@ -30,11 +31,12 @@ Config file location (or override with `ENGRAM_CONFIG_PATH`):
   },
   "db": {
     "path": "/path/to/db"
-  }
+  },
+  "default_limit": 20
 }
 ```
 
-**Warning:** changing `model.embedding_model` invalidates the vector database — all memories must be deleted and re-added.
+**Warning:** changing `model.embedding_model` invalidates the stored vectors — engram refuses to start and tells you to run `engram reembed`.
 
 Missing config file → created with defaults on first run. Partial/incomplete config → logs missing fields and exits.
 
@@ -47,9 +49,13 @@ On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downl
 ├── models/
 │   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
 └── db/
-    ├── meta.json   # sidecar index (list/lookup without vector query)
-    └── memories/   # chromem-go persistent storage (one file per doc)
+    ├── db_meta.json                          # records the active embedding model
+    └── KnightsAnalytics_all-MiniLM-L6-v2.db  # bolt file, one per model
 ```
+
+The bolt file holds two buckets: `memories` (JSON records) and `vectors`
+(binary float32 blobs, one per content chunk). One file per model is what lets
+`reembed` build the new model's database before deleting the old.
 
 ## Architecture
 
@@ -58,13 +64,13 @@ cmd/engram/          # binary entry point
   main.go            # wires config → store → server
 
 internal/config/     # Config struct + Load/Default
-internal/store/      # Store interface, chromemStore, metaIndex, hugot embedding
+internal/store/      # Store interface, boltStore, BM25 index, hugot embedding
 internal/server/     # App + MCP handlers + RegisterTools
 ```
 
 - **`Store` interface** (`internal/store/store.go`) — all persistence behind one interface, fully mockable
-- **`chromemStore`** — production: chromem-go vectors + `metaIndex` sidecar for listing
-- **`metaIndex`** — JSON file of all Memory records; handles Search's tag-only path/GetByID without a vector query
+- **`boltStore`** (`internal/store/bolt.go`) — production store. Each logical operation lands in one bolt transaction, so the bidirectional-link invariant holds by construction. In-memory maps serve reads and are updated only after a commit succeeds, so a failed write can't desync them.
+- **`bm25Index`** (`internal/store/bm25.go`) — lexical index over title/tags/content, rebuilt at open and never persisted. Also holds the RRF fusion and the relative-cutoff helpers.
 - **`App`** + **handlers** (`internal/server/`) — one method per MCP tool, uses `BindArguments` for typed arg parsing
 - **`RegisterTools`** (`internal/server/tools.go`) — declarative tool schema registration
 
@@ -73,9 +79,9 @@ internal/server/     # App + MCP handlers + RegisterTools
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
 | `store` | title (≤100 chars), content | tags, linked_ids |
-| `search` | query and/or tag_filter (at least one) | min_score (query only, default from config), limit (default from config; 0/negative = unlimited) |
+| `search` | query and/or tag_filter (at least one) | limit (default from config; 0/negative = unlimited) |
 | `retrieve` | memory_id | — |
 | `delete` | memory_id | — |
 | `update` | memory_id, plus at least one of: title, content, tags, linked_ids | — |
 
-`search` returns only `{id, title, tags}` per match; use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.
+`search` is hybrid: dense vector similarity and lexical BM25 fused by Reciprocal Rank Fusion, with titles and tags weighted above body text. Results are ranked and cut off relative to the best match, so there is no similarity threshold to configure. It returns only `{id, title, tags}` per match; use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.

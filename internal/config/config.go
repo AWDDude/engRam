@@ -22,11 +22,14 @@ type DBConfig struct {
 }
 
 // Config holds all runtime configuration for engram.
+//
+// A config file left over from an earlier version may still carry
+// "default_min_score"; it is ignored rather than rejected, since search no
+// longer has a similarity threshold to set.
 type Config struct {
-	Model           ModelConfig `json:"model"`
-	DB              DBConfig    `json:"db"`
-	DefaultMinScore float64     `json:"default_min_score"`
-	DefaultLimit    int         `json:"default_limit"`
+	Model        ModelConfig `json:"model"`
+	DB           DBConfig    `json:"db"`
+	DefaultLimit int         `json:"default_limit"`
 }
 
 // dataDir returns the user data directory for engram.
@@ -58,8 +61,7 @@ func Default() Config {
 		DB: DBConfig{
 			Path: filepath.Join(base, "db"),
 		},
-		DefaultMinScore: 0.5,
-		DefaultLimit:    20,
+		DefaultLimit: 20,
 	}
 }
 
@@ -141,17 +143,11 @@ func Load() (Config, error) {
 	if parsed.DB.Path == "" {
 		missing = append(missing, "db.path")
 	}
-	if parsed.DefaultMinScore == 0 {
-		missing = append(missing, "search.default_min_score")
-	}
 	if presence.DefaultLimit == nil {
 		missing = append(missing, "default_limit")
 	}
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("config %s missing required fields: %s", configPath, strings.Join(missing, ", "))
-	}
-	if parsed.DefaultMinScore < 0 || parsed.DefaultMinScore > 1 {
-		return Config{}, fmt.Errorf("config %s: search.default_min_score must be between 0 and 1", configPath)
 	}
 	if parsed.DefaultLimit < 0 {
 		return Config{}, fmt.Errorf("config %s: default_limit must not be negative", configPath)

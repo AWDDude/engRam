@@ -80,7 +80,6 @@ func TestLoad_FromFile(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/custom/models", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/custom/db"},
-		"default_min_score": 0.5,
 		"default_limit":     20,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -140,7 +139,6 @@ func TestLoad_XDGConfigHome(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/xdg/config/models", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/xdg/config/db"},
-		"default_min_score": 0.5,
 		"default_limit":     20,
 	})
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), data, 0600); err != nil {
@@ -171,77 +169,10 @@ func TestLoad_MissingFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing fields, got nil")
 	}
-	for _, field := range []string{"model.embedding_model", "db.path", "search.default_min_score", "default_limit"} {
+	for _, field := range []string{"model.embedding_model", "db.path", "default_limit"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("expected error to mention %q, got: %v", field, err)
 		}
-	}
-}
-
-func TestLoad_DefaultMinScore(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	data, _ := json.Marshal(map[string]any{
-		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
-		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 0.7,
-		"default_limit":     20,
-	})
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("ENGRAM_CONFIG_PATH", path)
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.DefaultMinScore != 0.7 {
-		t.Errorf("expected default_min_score 0.7, got %v", cfg.DefaultMinScore)
-	}
-}
-
-func TestLoad_DefaultMinScore_Missing(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	data, _ := json.Marshal(map[string]any{
-		"model": map[string]string{"path": "/m", "embedding_model": "custom/model"},
-		"db":    map[string]string{"path": "/db"},
-	})
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("ENGRAM_CONFIG_PATH", path)
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for missing default_min_score, got nil")
-	}
-	if !strings.Contains(err.Error(), "search.default_min_score") {
-		t.Errorf("expected error to mention search.default_min_score, got: %v", err)
-	}
-}
-
-func TestLoad_DefaultMinScore_OutOfRange(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	data, _ := json.Marshal(map[string]any{
-		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
-		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 1.5,
-		"default_limit":     20,
-	})
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("ENGRAM_CONFIG_PATH", path)
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for out-of-range default_min_score, got nil")
-	}
-	if !strings.Contains(err.Error(), "search.default_min_score") {
-		t.Errorf("expected error to mention search.default_min_score, got: %v", err)
 	}
 }
 
@@ -251,7 +182,6 @@ func TestLoad_DefaultLimit(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 0.5,
 		"default_limit":     50,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -274,7 +204,6 @@ func TestLoad_DefaultLimit_ExplicitZeroMeansUnlimited(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 0.5,
 		"default_limit":     0,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -297,7 +226,6 @@ func TestLoad_DefaultLimit_Missing(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 0.5,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -319,7 +247,6 @@ func TestLoad_DefaultLimit_Negative(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
 		"db":                map[string]string{"path": "/db"},
-		"default_min_score": 0.5,
 		"default_limit":     -1,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {

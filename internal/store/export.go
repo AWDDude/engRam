@@ -30,7 +30,7 @@ func exportStore(ctx context.Context, st Store, w io.Writer) (int, error) {
 	// which with an empty tag filter and unlimited limit lists every memory
 	// by id — going through the interface keeps Export usable against any
 	// Store implementation rather than only chromemStore.
-	results, err := st.Search(ctx, "", "", 0, 0)
+	results, err := st.Search(ctx, "", "", 0)
 	if err != nil {
 		return 0, fmt.Errorf("listing memories: %w", err)
 	}

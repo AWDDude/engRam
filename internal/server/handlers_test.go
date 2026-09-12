@@ -44,7 +44,7 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 	return id, nil
 }
 
-func (m *mockStore) Search(_ context.Context, query, tagFilter string, _ float32, limit int) ([]store.SearchResult, error) {
+func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
 	if m.searchErr != nil {
 		return nil, m.searchErr
 	}
@@ -111,15 +111,15 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 	return nil
 }
 
-// captureSearchArgsStore wraps mockStore to capture the minScore/limit passed to Search.
+// captureSearchArgsStore wraps mockStore to capture the limit passed to Search.
 type captureSearchArgsStore struct {
 	*mockStore
-	onSearch func(minScore float32, limit int)
+	onSearch func(limit int)
 }
 
-func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]store.SearchResult, error) {
-	c.onSearch(minScore, limit)
-	return c.mockStore.Search(ctx, query, tagFilter, minScore, limit)
+func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
+	c.onSearch(limit)
+	return c.mockStore.Search(ctx, query, tagFilter, limit)
 }
 
 // makeRequest builds a CallToolRequest with the given arguments map.
@@ -391,9 +391,9 @@ func TestHandleSearchMemory_RequiresQueryOrTagFilter(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_TagFilterOnly_MinScoreProvidedNoError(t *testing.T) {
-	// min_score only has meaning with a query — when tag_filter alone is used,
-	// a provided min_score should simply be ignored, not rejected.
+func TestHandleSearchMemory_TagFilterOnly_StaleArgumentIgnored(t *testing.T) {
+	// min_score was removed from the tool schema. A client still sending it
+	// (an old cached schema, a stale prompt) must be tolerated, not rejected.
 	ms := newMockStore()
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Tagged", Content: "content", Tags: []string{"x"}}
 	app := &App{store: ms}
@@ -404,7 +404,7 @@ func TestHandleSearchMemory_TagFilterOnly_MinScoreProvidedNoError(t *testing.T) 
 		t.Fatal(err)
 	}
 	if result.IsError {
-		t.Fatalf("expected min_score to be harmlessly ignored without a query, got error: %v", result.Content)
+		t.Fatalf("expected a removed argument to be harmlessly ignored, got error: %v", result.Content)
 	}
 }
 
@@ -433,52 +433,12 @@ func TestHandleSearchMemory_ReturnsResults(t *testing.T) {
 	}
 }
 
-func TestHandleSearchMemory_CustomMinScore(t *testing.T) {
-	var capturedScore float32
-	ms := newMockStore()
-	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
-
-	app := &App{store: &captureSearchArgsStore{mockStore: ms, onSearch: func(s float32, _ int) { capturedScore = s }}}
-
-	minScore := 0.8
-	req := makeRequest(map[string]any{"query": "item", "min_score": minScore})
-	result, err := app.handleSearchMemory(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	if capturedScore != float32(minScore) {
-		t.Errorf("expected min_score %.1f, got %.1f", minScore, capturedScore)
-	}
-}
-
-func TestHandleSearchMemory_DefaultMinScore(t *testing.T) {
-	var capturedScore float32
-	ms := newMockStore()
-	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
-
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(s float32, _ int) { capturedScore = s }}, 0.7, 20)
-	req := makeRequest(map[string]any{"query": "item"})
-	result, err := app.handleSearchMemory(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.IsError {
-		t.Fatalf("unexpected error: %v", result.Content)
-	}
-	if capturedScore != 0.7 {
-		t.Errorf("expected default min_score 0.7, got %.2f", capturedScore)
-	}
-}
-
 func TestHandleSearchMemory_LimitDefault(t *testing.T) {
 	var capturedLimit int
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20)
 	req := makeRequest(map[string]any{"query": "item"})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
@@ -497,7 +457,7 @@ func TestHandleSearchMemory_LimitExplicitZeroMeansUnlimited(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20)
 	limit := 0
 	req := makeRequest(map[string]any{"query": "item", "limit": limit})
 	result, err := app.handleSearchMemory(context.Background(), req)
@@ -517,7 +477,7 @@ func TestHandleSearchMemory_LimitNegative(t *testing.T) {
 	ms := newMockStore()
 	ms.memories["id-1"] = store.Memory{ID: "id-1", Title: "Item", Content: "item"}
 
-	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(_ float32, l int) { capturedLimit = l }}, 0.5, 20)
+	app := NewApp(&captureSearchArgsStore{mockStore: ms, onSearch: func(l int) { capturedLimit = l }}, 20)
 	limit := -1
 	req := makeRequest(map[string]any{"query": "item", "limit": limit})
 	result, err := app.handleSearchMemory(context.Background(), req)

@@ -32,15 +32,12 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("search",
-			mcp.WithDescription("Search stored memories by semantic query and/or tag filter. At least one of query or tag_filter is required. Returns only id, title, and tags for each match — use retrieve for full details."),
+			mcp.WithDescription("Search stored memories by hybrid semantic + keyword query and/or tag filter. At least one of query or tag_filter is required. Results are ranked by relevance. Returns only id, title, and tags for each match — use retrieve for full details."),
 			mcp.WithString("query",
-				mcp.Description("Semantic search query (matches title and content)"),
+				mcp.Description("Search query (matches title and content, both semantically and by keyword)"),
 			),
 			mcp.WithString("tag_filter",
 				mcp.Description("Filter by tag (case-insensitive substring match)"),
-			),
-			mcp.WithNumber("min_score",
-				mcp.Description("Minimum cosine similarity threshold (0–1); only applies when query is given; overrides the configured default"),
 			),
 			mcp.WithInteger("limit",
 				mcp.Description("Maximum results to return (omitted = configured default; 0 or negative = unlimited)"),

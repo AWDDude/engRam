@@ -99,7 +99,7 @@ func TestReembedWithEmb_HappyPath(t *testing.T) {
 			t.Errorf("memory %s not found in new store: %v", id, err)
 		}
 	}
-	results, err := newStore.Search(ctx, "", "", 0, 0)
+	results, err := newStore.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

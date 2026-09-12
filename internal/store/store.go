@@ -56,7 +56,7 @@ type MemoryUpdate struct {
 // Store is the persistence interface for memories.
 type Store interface {
 	Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error)
-	Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]SearchResult, error)
+	Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id string, patch MemoryUpdate) error

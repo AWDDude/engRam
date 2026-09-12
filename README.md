@@ -8,9 +8,10 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 
 - **Single binary** — no Python, no Docker, no runtime dependencies
 - **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX ([all-MiniLM-L6-v2](https://huggingface.co/KnightsAnalytics/all-MiniLM-L6-v2), Apache 2.0, downloaded once on first run)
-- **Persistent vector search** via [chromem-go](https://github.com/philippgille/chromem-go) (embedded, file-based)
-- **5 MCP tools** — store, search, list, update, delete
-- **Semantic search** with optional type filtering
+- **Single-file storage** via [bbolt](https://github.com/etcd-io/bbolt) — records, vectors, and links in one ACID database
+- **5 MCP tools** — store, search, retrieve, update, delete
+- **Hybrid search** — vector similarity and BM25 keyword matching fused by Reciprocal Rank Fusion, so exact tokens and fuzzy recall both work
+- **Bidirectional links** between memories, with cascading cleanup on delete
 - **XDG-compliant** data and config paths on all platforms
 - **Model migration** — switch embedding models without losing memories
 - **CSV export/import** — back up and restore all memories
@@ -72,7 +73,8 @@ If the config file does not exist, engram creates it with defaults on first run.
   },
   "db": {
     "path": "/path/to/db"
-  }
+  },
+  "default_limit": 20
 }
 ```
 
@@ -93,7 +95,7 @@ Run the reembed command to re-embed all memories with the new model:
 engram reembed
 ```
 
-Re-embedding is atomic — the new collection is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
+Re-embedding is atomic — the new model's database is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
 
 ## Export / import
 
@@ -104,31 +106,43 @@ engram export -f memories.csv
 engram import -f memories.csv
 ```
 
-The CSV has columns `id, content, type, tags, created_at` (tags joined with `;`). Import preserves IDs, tags, and creation timestamps from the file; rows with a blank ID are assigned a new one.
+The CSV has columns `id, title, content, tags, linked_ids, created_at` (tags and linked_ids joined with `;`). Import preserves IDs, tags, links, and creation timestamps from the file; rows with a blank ID are assigned a new one.
 
 ## Tools
 
 | Tool | Required | Optional |
 |------|----------|----------|
-| `store` | `content`, `type` | `tags` |
-| `search` | `query` | `min_score` (default 0.5) |
-| `list` | — | `type_filter`, `tag_filter`, `limit` (default 20) |
+| `store` | `title` (≤100 chars), `content` | `tags`, `linked_ids` |
+| `search` | `query` and/or `tag_filter` (at least one) | `limit` (default from config; 0/negative = unlimited) |
+| `retrieve` | `memory_id` | — |
 | `delete` | `memory_id` | — |
-| `update` | `memory_id`, `content` | — |
+| `update` | `memory_id`, plus at least one of `title`, `content`, `tags`, `linked_ids` | — |
 
-**Memory types:** `preference`, `task`, `fact`, `action`
+There is no `type` field — tags are the only categorization mechanism.
 
-`min_score` is a cosine similarity threshold (0–1). Results below it are excluded. Omit to use the default of 0.5.
+`search` runs a hybrid query: dense vector similarity and lexical BM25 in
+parallel, fused by Reciprocal Rank Fusion. The lexical half is what finds a
+half-remembered exact token (an identifier, an error string, a name) that
+embeddings alone tend to smooth over; titles and tags are weighted above body
+text. Results are ranked by relevance and cut off relative to the best match,
+so there is no similarity threshold to configure.
 
-`delete` and `update` return an error if `memory_id` does not exist.
+`search` returns only `{id, title, tags}` per match — use `retrieve` for full
+details, including the id/title/tags of linked memories.
+
+`linked_ids` are bidirectional: linking or unlinking a memory updates the
+memory on the other end too, and deleting one cascades the cleanup.
+
+`delete`, `update`, and `retrieve` return an error if `memory_id` does not exist.
 
 ### Examples
 
 ```
-store(content="prefers dark mode", type="preference", tags=["ui"])
+store(title="Editor preference", content="prefers dark mode", tags=["ui"])
 search(query="UI preferences")
-search(query="UI preferences", min_score=0.7)
-list(type_filter="fact", tag_filter="kubernetes")
+search(query="UI preferences", limit=5)
+search(tag_filter="kubernetes")
+retrieve(memory_id="<id>")
 update(memory_id="<id>", content="updated content")
 delete(memory_id="<id>")
 ```

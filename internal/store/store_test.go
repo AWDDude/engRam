@@ -133,7 +133,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", "", 0, 0)
+	results, err := s.Search(ctx, "anything", "", 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", "", 0, 0)
+	results, err := s.Search(ctx, "terminal preferences", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "some content", "", 0, 0)
+	results, err := s.Search(ctx, "some content", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestStore_Search_TagOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "KUBE", 0, 0)
+	results, err := s.Search(ctx, "", "KUBE", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestStore_Search_TagOnly_All(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "", 0, 0)
+	results, err := s.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "", "", 0, 3)
+	results, err := s.Search(ctx, "", "", 3)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0, 0)
+	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0 word1 word2", "", 0, 0)
+	results, err := s.Search(ctx, "word0 word1 word2", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0", "", 0, 0)
+	results, err := s.Search(ctx, "word0", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, err := s.Search(ctx, "word0", "", 0, 0)
+	results, err := s.Search(ctx, "word0", "", 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -583,7 +583,7 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, err := s.Search(ctx, "word0 word1", "", 0, 0)
+	results, err := s.Search(ctx, "word0 word1", "", 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0, 0)
+	results, err := s.Search(ctx, "memory item", "", 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestStore_Search_QueryLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0, 3)
+	results, err := s.Search(ctx, "memory item", "", 3)
 	if err != nil {
 		t.Fatalf("Search with limit: %v", err)
 	}
@@ -654,7 +654,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	results, err := s.Search(ctx, "", "", 0, 0)
+	results, err := s.Search(ctx, "", "", 0)
 	if err != nil {
 		t.Fatalf("Search after concurrent adds: %v", err)
 	}
