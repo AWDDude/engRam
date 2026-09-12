@@ -53,29 +53,38 @@ func newEmbeddingFunc(ctx context.Context, modelDir, model, onnxFile string) (Em
 	}
 	cleanup := func() { _ = session.Destroy() }
 
-	// Must exist before DownloadModel runs; see modelDownloadDir.
-	if err := os.MkdirAll(modelDownloadDir(modelDir, model), 0o755); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("creating model dir: %w", err)
-	}
-
-	opts := hugot.NewDownloadOptions()
-	opts.OnnxFilePath = onnxFile
-
-	modelPath, err := hugot.DownloadModel(ctx, model, modelDir, opts)
-	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("downloading model %s: %w", model, err)
-	}
-
 	// modelDownloadDir and the OnnxFilename below both assume hugot's current
-	// flatten-to-basename layout; checking for the file here turns a layout
-	// change into a clear error instead of a confusing one surfacing later
-	// from inside the pipeline/onnxruntime.
+	// flatten-to-basename layout.
+	modelPath := modelDownloadDir(modelDir, model)
 	onnxPath := filepath.Join(modelPath, filepath.Base(onnxFile))
+
+	// hugot.DownloadModel always hits the network to check the model's
+	// revision, even when every file is already cached locally, so skip it
+	// entirely once we can see the onnx file is already on disk.
 	if _, err := os.Stat(onnxPath); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("downloaded model %s but expected onnx file not found at %s: %w", model, onnxPath, err)
+		// Must exist before DownloadModel runs; see modelDownloadDir.
+		if err := os.MkdirAll(modelPath, 0o755); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("creating model dir: %w", err)
+		}
+
+		opts := hugot.NewDownloadOptions()
+		opts.OnnxFilePath = onnxFile
+
+		modelPath, err = hugot.DownloadModel(ctx, model, modelDir, opts)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("downloading model %s: %w", model, err)
+		}
+
+		// Checking for the file here turns a hugot layout change into a
+		// clear error instead of a confusing one surfacing later from
+		// inside the pipeline/onnxruntime.
+		onnxPath = filepath.Join(modelPath, filepath.Base(onnxFile))
+		if _, err := os.Stat(onnxPath); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("downloaded model %s but expected onnx file not found at %s: %w", model, onnxPath, err)
+		}
 	}
 
 	pipeline, err := hugot.NewPipeline(session, hugot.FeatureExtractionConfig{

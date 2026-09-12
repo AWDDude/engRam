@@ -55,7 +55,12 @@ func main() {
 	}
 	defer cleanup()
 
-	s := mcpserver.NewMCPServer("engram", version)
+	// RegisterTools below registers a fixed set of tools once at startup and
+	// never changes it afterward; declaring listChanged: false here (instead
+	// of leaving it to mcp-go's implicit listChanged: true default) avoids
+	// misleading clients into subscribing to tool-list-change notifications
+	// that will never come.
+	s := mcpserver.NewMCPServer("engram", version, mcpserver.WithToolCapabilities(false))
 	server.RegisterTools(s, server.NewApp(st, cfg.DefaultLimit, cfg.MaxContentChars))
 
 	if err := mcpserver.ServeStdio(s); err != nil {
