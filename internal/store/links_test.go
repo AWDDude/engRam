@@ -745,12 +745,10 @@ func TestLinks_ConcurrentTagsUpdateDoesNotClobberConcurrentLink(t *testing.T) {
 
 // TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink is the same
 // regression as above but for Update's re-embed branch (content changed),
-// which persists via a separate write path. Only one pair is used (unlike
-// the tags-only version above): running several content re-embeds
-// concurrently would race each other inside chromem-go's own collection
-// locking (a pre-existing issue in that dependency, unrelated to this bug),
-// which a single content-update goroutine paired with a links-only goroutine
-// (no chromem-go collection access) avoids.
+// which re-embeds before taking the lock. Only one pair is used (unlike the
+// tags-only version above) to keep the test fast: each content update costs a
+// real embedding pass, and the invariant under test is about one re-embed
+// racing one link change, not about embedding throughput.
 func TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
