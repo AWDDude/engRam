@@ -91,36 +91,59 @@ func writeDefault(path string, cfg Config) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
+// configFilePath resolves the config file location: ENGRAM_CONFIG_PATH if
+// set, otherwise config.json in the platform config directory, falling back
+// to ~/.engram if that cannot be determined.
+func configFilePath() string {
+	if p := os.Getenv("ENGRAM_CONFIG_PATH"); p != "" {
+		return p
+	}
+	cfgDir, err := configDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		cfgDir = filepath.Join(home, ".engram")
+	}
+	return filepath.Join(cfgDir, "config.json")
+}
+
 // Load reads config from ENGRAM_CONFIG_PATH, falling back to config.json in
 // the platform config directory. If the file does not exist it is created with
 // default values. ENGRAM_CONFIG_PATH skips auto-creation.
+//
+// Fields absent from an existing config file are filled in with their
+// defaults and reported on stderr, rather than being rejected. The file on
+// disk is left untouched: it may be managed by a dotfiles tool, and silently
+// rewriting it would show up there as drift.
 func Load() (Config, error) {
-	cfg := Default()
-
-	configPath := os.Getenv("ENGRAM_CONFIG_PATH")
-	if configPath == "" {
-		cfgDir, err := configDir()
-		if err != nil {
-			home, _ := os.UserHomeDir()
-			cfgDir = filepath.Join(home, ".engram")
-		}
-		configPath = filepath.Join(cfgDir, "config.json")
+	path := configFilePath()
+	cfg, defaulted, err := load(path)
+	if len(defaulted) > 0 {
+		fmt.Fprintf(os.Stderr, "engram: config %s: using defaults for %s\n",
+			path, strings.Join(defaulted, ", "))
 	}
+	return cfg, err
+}
+
+// load does the work behind Load, returning the names of any fields that fell
+// back to their default so the caller can report them. Split out so the
+// defaulting logic is testable without capturing stderr.
+func load(configPath string) (Config, []string, error) {
+	cfg := Default()
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		if err := writeDefault(configPath, cfg); err != nil {
-			return cfg, fmt.Errorf("creating default config %s: %w", configPath, err)
+			return cfg, nil, fmt.Errorf("creating default config %s: %w", configPath, err)
 		}
-		return cfg, nil
+		return cfg, nil, nil
 	}
 	if err != nil {
-		return cfg, fmt.Errorf("reading config %s: %w", configPath, err)
+		return cfg, nil, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
 	var parsed Config
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return Config{}, fmt.Errorf("parsing config %s: %w", configPath, err)
+		return Config{}, nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
 
 	// default_limit's zero value is also its documented "unlimited" meaning
@@ -130,27 +153,29 @@ func Load() (Config, error) {
 		DefaultLimit *int `json:"default_limit"`
 	}
 	if err := json.Unmarshal(data, &presence); err != nil {
-		return Config{}, fmt.Errorf("parsing config %s: %w", configPath, err)
+		return Config{}, nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
 
-	var missing []string
+	// Absent fields take their default. Only values the file actually sets are
+	// validated below — a field the user never wrote can't be wrong.
+	var defaulted []string
 	if parsed.Model.Path == "" {
-		missing = append(missing, "model.path")
+		parsed.Model.Path = cfg.Model.Path
+		defaulted = append(defaulted, "model.path")
 	}
 	if parsed.Model.EmbeddingModel == "" {
-		missing = append(missing, "model.embedding_model")
+		parsed.Model.EmbeddingModel = cfg.Model.EmbeddingModel
+		defaulted = append(defaulted, "model.embedding_model")
 	}
 	if parsed.DB.Path == "" {
-		missing = append(missing, "db.path")
+		parsed.DB.Path = cfg.DB.Path
+		defaulted = append(defaulted, "db.path")
 	}
 	if presence.DefaultLimit == nil {
-		missing = append(missing, "default_limit")
+		parsed.DefaultLimit = cfg.DefaultLimit
+		defaulted = append(defaulted, "default_limit")
+	} else if parsed.DefaultLimit < 0 {
+		return Config{}, nil, fmt.Errorf("config %s: default_limit must not be negative", configPath)
 	}
-	if len(missing) > 0 {
-		return Config{}, fmt.Errorf("config %s missing required fields: %s", configPath, strings.Join(missing, ", "))
-	}
-	if parsed.DefaultLimit < 0 {
-		return Config{}, fmt.Errorf("config %s: default_limit must not be negative", configPath)
-	}
-	return parsed, nil
+	return parsed, defaulted, nil
 }

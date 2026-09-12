@@ -63,7 +63,7 @@ engRam uses XDG-style directories by default on all platforms:
 
 `XDG_DATA_HOME` and `XDG_CONFIG_HOME` are honored on all platforms. Override the config path entirely with `ENGRAM_CONFIG_PATH`.
 
-If the config file does not exist, engram creates it with defaults on first run. All fields are required — engram will log any missing fields and exit if the file is incomplete.
+If the config file does not exist, engram creates it with defaults on first run. Every field is optional: any field you omit falls back to its default, and engram notes on stderr which defaults it used. Your config file is never rewritten, so a partial config managed by a dotfiles tool stays exactly as you wrote it. Malformed JSON, or an out-of-range value you did set, is still an error.
 
 ```json
 {

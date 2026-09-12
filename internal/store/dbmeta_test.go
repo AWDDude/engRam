@@ -65,7 +65,6 @@ func TestModelChangedError_Message(t *testing.T) {
 	}
 }
 
-
 func TestNewBoltStore_ModelMismatch(t *testing.T) {
 	dir := t.TempDir()
 
@@ -115,7 +114,6 @@ func TestNewBoltStore_FirstRun_WritesDBMeta(t *testing.T) {
 		t.Errorf("expected db_meta.json to record 'test-model', got %q", meta.ActiveModel)
 	}
 }
-
 
 // Ensure ModelChangedError satisfies the error interface for errors.As.
 func TestModelChangedError_As(t *testing.T) {

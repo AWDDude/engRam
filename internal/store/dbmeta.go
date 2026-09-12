@@ -8,12 +8,11 @@ import (
 	"strings"
 )
 
-
 type dbMeta struct {
 	ActiveModel string `json:"active_model"`
 }
 
-// ModelChangedError is returned by NewChromemStore when the configured model
+// ModelChangedError is returned by NewBoltStore when the configured model
 // differs from the one used to build the existing database.
 type ModelChangedError struct {
 	OldModel string
@@ -61,4 +60,3 @@ func modelDBPath(dbPath, model string) string {
 	safe := strings.ReplaceAll(model, "/", "_")
 	return filepath.Join(dbPath, safe+".db")
 }
-

@@ -38,7 +38,7 @@ Config file location (or override with `ENGRAM_CONFIG_PATH`):
 
 **Warning:** changing `model.embedding_model` invalidates the stored vectors — engram refuses to start and tells you to run `engram reembed`.
 
-Missing config file → created with defaults on first run. Partial/incomplete config → logs missing fields and exits.
+Missing config file → created with defaults on first run. Partial config → omitted fields take their default, reported on stderr; the file itself is never rewritten (it may be dotfiles-managed). Malformed JSON or an explicitly set out-of-range value → error and exit.
 
 On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downloaded from Hugging Face to `model_dir`. Subsequent starts load it from disk with no network access.
 
