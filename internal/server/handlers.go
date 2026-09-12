@@ -85,6 +85,12 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 
 	id, err := a.store.Add(ctx, args.Title, args.Content, args.Tags, args.LinkedIDs)
 	if err != nil {
+		if id != "" {
+			// The memory was persisted but linking failed partway through
+			// (see store.Add); surface the id so the caller can still
+			// retrieve/update/delete it instead of losing track of it.
+			return mcp.NewToolResultError(fmt.Sprintf("store error: %v (memory was created with id %q)", err, id)), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(`{"id":%q,"status":"stored"}`, id)), nil

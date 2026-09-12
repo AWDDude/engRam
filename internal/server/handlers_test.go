@@ -20,6 +20,7 @@ type mockStore struct {
 	memories  map[string]store.Memory
 	counter   int
 	searchErr error
+	addErr    error
 }
 
 func newMockStore() *mockStore {
@@ -36,6 +37,9 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 		Tags:      tags,
 		LinkedIDs: linkedIDs,
 		CreatedAt: "2026-01-01T00:00:00Z",
+	}
+	if m.addErr != nil {
+		return id, m.addErr
 	}
 	return id, nil
 }
@@ -176,6 +180,30 @@ func TestHandleStoreMemory_WithLinkedIDs(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("stored memory not found")
+	}
+}
+
+func TestHandleStoreMemory_PartialFailureSurfacesID(t *testing.T) {
+	ms := newMockStore()
+	ms.addErr = fmt.Errorf("memory created but linking failed: linked memory %q not found", "missing")
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{
+		"title":      "New memory",
+		"content":    "new content",
+		"linked_ids": []any{"missing"},
+	})
+
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result")
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "test-id-1") {
+		t.Errorf("expected the partially-created memory's id to be surfaced in the error so the caller can address it, got: %s", text)
 	}
 }
 

@@ -268,6 +268,29 @@ func TestLoad_DefaultLimit(t *testing.T) {
 	}
 }
 
+func TestLoad_DefaultLimit_ExplicitZeroMeansUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data, _ := json.Marshal(map[string]any{
+		"model":             map[string]string{"path": "/m", "embedding_model": "custom/model"},
+		"db":                map[string]string{"path": "/db"},
+		"default_min_score": 0.5,
+		"default_limit":     0,
+	})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ENGRAM_CONFIG_PATH", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DefaultLimit != 0 {
+		t.Errorf("expected default_limit 0, got %v", cfg.DefaultLimit)
+	}
+}
+
 func TestLoad_DefaultLimit_Missing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

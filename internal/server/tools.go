@@ -43,7 +43,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("Minimum cosine similarity threshold (0–1); only applies when query is given; overrides the configured default"),
 			),
 			mcp.WithInteger("limit",
-				mcp.Description("Maximum results to return (0 or omitted = configured default; negative = unlimited)"),
+				mcp.Description("Maximum results to return (omitted = configured default; 0 or negative = unlimited)"),
 			),
 		),
 		app.handleSearchMemory,

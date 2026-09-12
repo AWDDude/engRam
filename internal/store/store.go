@@ -311,6 +311,25 @@ func (s *chromemStore) Add(ctx context.Context, title, content string, tags, lin
 // Update) go through syncLinks separately; CSV import and Reembed intentionally
 // bypass it and restore linkedIDs as-is (see import.go).
 func (s *chromemStore) addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error {
+	if err := s.writeVectorDocs(ctx, id, title, content, tags, createdAt); err != nil {
+		return err
+	}
+	return s.meta.set(Memory{
+		ID:        id,
+		Title:     title,
+		Content:   content,
+		Tags:      tags,
+		LinkedIDs: linkedIDs,
+		CreatedAt: createdAt,
+	})
+}
+
+// writeVectorDocs stores the embeddable text for a memory into the chromem
+// collection (chunking large content). It does not touch the metaIndex —
+// callers that need to persist the metadata record too should use addMemory,
+// or (as Update does) write it separately once they have a lock-consistent
+// view of fields they aren't overwriting.
+func (s *chromemStore) writeVectorDocs(ctx context.Context, id, title, content string, tags []string, createdAt string) error {
 	tagsJSON, _ := json.Marshal(tags)
 	baseMeta := map[string]string{
 		// Best-effort/write-only, same as today: nothing reads tags/created_at
@@ -329,34 +348,27 @@ func (s *chromemStore) addMemory(ctx context.Context, id, title, content string,
 		}); err != nil {
 			return fmt.Errorf("adding to vector store: %w", err)
 		}
-	} else {
-		chunkMeta := make(map[string]string, len(baseMeta)+1)
-		for k, v := range baseMeta {
-			chunkMeta[k] = v
-		}
-		chunkMeta["parent_id"] = id
-
-		for i, chunk := range chunks {
-			if err := s.col.AddDocument(ctx, chromem.Document{
-				ID:       fmt.Sprintf("%s:chunk:%d", id, i),
-				Content:  chunk,
-				Metadata: chunkMeta,
-			}); err != nil {
-				// Clean up any chunks already written.
-				_ = s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
-				return fmt.Errorf("adding chunk %d to vector store: %w", i, err)
-			}
-		}
+		return nil
 	}
 
-	return s.meta.set(Memory{
-		ID:        id,
-		Title:     title,
-		Content:   content,
-		Tags:      tags,
-		LinkedIDs: linkedIDs,
-		CreatedAt: createdAt,
-	})
+	chunkMeta := make(map[string]string, len(baseMeta)+1)
+	for k, v := range baseMeta {
+		chunkMeta[k] = v
+	}
+	chunkMeta["parent_id"] = id
+
+	for i, chunk := range chunks {
+		if err := s.col.AddDocument(ctx, chromem.Document{
+			ID:       fmt.Sprintf("%s:chunk:%d", id, i),
+			Content:  chunk,
+			Metadata: chunkMeta,
+		}); err != nil {
+			// Clean up any chunks already written.
+			_ = s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
+			return fmt.Errorf("adding chunk %d to vector store: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // deleteChromemDocs removes all chromem documents belonging to a memory. It
@@ -460,19 +472,45 @@ func (s *chromemStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *chromemStore) Update(ctx context.Context, id string, patch MemoryUpdate) error {
-	existing, err := s.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-
-	linkedIDs := existing.LinkedIDs
+	// linked_ids, if patched, is handled first and entirely by syncLinks,
+	// which validates and persists atomically under one lock. Everything
+	// below must avoid re-persisting a stale snapshot of LinkedIDs on top of
+	// that (or of a concurrent link change from some other memory's
+	// Update) — each branch below re-reads the current record immediately
+	// before writing and only overwrites the fields this call actually
+	// patched.
 	if patch.LinkedIDs != nil {
-		linkedIDs, err = s.syncLinks(id, *patch.LinkedIDs)
-		if err != nil {
+		if _, err := s.syncLinks(id, *patch.LinkedIDs); err != nil {
 			return err
 		}
 	}
 
+	needsReembed := patch.Title != nil || patch.Content != nil
+
+	if !needsReembed {
+		if patch.Tags == nil {
+			if patch.LinkedIDs == nil {
+				// Nothing was patched at all; still report a not-found id.
+				_, err := s.GetByID(ctx, id)
+				return err
+			}
+			return nil // syncLinks above already persisted the only change.
+		}
+		return s.meta.withLock(func() error {
+			current, ok := s.meta.getRaw(id)
+			if !ok {
+				return fmt.Errorf("memory %q not found", id)
+			}
+			current.Tags = *patch.Tags
+			s.meta.setRaw(current)
+			return nil
+		})
+	}
+
+	existing, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
 	title := existing.Title
 	if patch.Title != nil {
 		title = *patch.Title
@@ -486,21 +524,25 @@ func (s *chromemStore) Update(ctx context.Context, id string, patch MemoryUpdate
 		tags = *patch.Tags
 	}
 
-	if patch.Title == nil && patch.Content == nil {
-		// No re-embed needed. linked_ids (if patched) was already persisted
-		// by syncLinks above; only need to persist here if tags also changed.
-		if patch.Tags == nil {
-			return nil
-		}
-		existing.Tags = tags
-		existing.LinkedIDs = linkedIDs
-		return s.meta.set(existing)
-	}
-
 	if err := s.deleteChromemDocs(ctx, id); err != nil {
 		return err
 	}
-	return s.addMemory(ctx, id, title, content, tags, linkedIDs, existing.CreatedAt)
+	if err := s.writeVectorDocs(ctx, id, title, content, tags, existing.CreatedAt); err != nil {
+		return err
+	}
+	return s.meta.withLock(func() error {
+		current, ok := s.meta.getRaw(id)
+		if !ok {
+			return fmt.Errorf("memory %q not found", id)
+		}
+		current.Title = title
+		current.Content = content
+		if patch.Tags != nil {
+			current.Tags = tags
+		}
+		s.meta.setRaw(current)
+		return nil
+	})
 }
 
 // normalizeLinks dedupes ids and drops any reference to selfID, preserving
@@ -602,7 +644,10 @@ func (s *chromemStore) cascadeUnlink(id string) error {
 	return s.meta.withLock(func() error {
 		target, ok := s.meta.getRaw(id)
 		if !ok {
-			return fmt.Errorf("memory %q not found", id)
+			// Already removed by a concurrent delete; nothing left to
+			// unlink. Mirrors the old metaIndex.remove's silent no-op on a
+			// missing key, so a racing double-delete stays idempotent.
+			return nil
 		}
 		for _, peerID := range target.LinkedIDs {
 			peer, ok := s.meta.getRaw(peerID)

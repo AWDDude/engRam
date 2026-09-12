@@ -586,3 +586,117 @@ func TestLinks_ConcurrentUpdatesOnOverlappingLinks_SerializesCorrectly(t *testin
 		t.Errorf("expected exactly 2 links on C (no lost update), got %v", c.LinkedIDs)
 	}
 }
+
+// TestLinks_ConcurrentTagsUpdateDoesNotClobberConcurrentLink guards against a
+// regression where Update's tags-only branch persisted a LinkedIDs snapshot
+// taken before a concurrent Update on a peer had linked back to this memory,
+// silently reverting that link.
+func TestLinks_ConcurrentTagsUpdateDoesNotClobberConcurrentLink(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const pairs = 20
+	aIDs := make([]string, pairs)
+	bIDs := make([]string, pairs)
+	for i := range aIDs {
+		aIDs[i], _ = s.Add(ctx, fmt.Sprintf("A%d", i), "a", nil, nil)
+		bIDs[i], _ = s.Add(ctx, fmt.Sprintf("B%d", i), "b", nil, nil)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(pairs * 2)
+	for i := 0; i < pairs; i++ {
+		i := i
+		newTags := []string{"tag1"}
+		go func() {
+			defer wg.Done()
+			if err := s.Update(ctx, aIDs[i], MemoryUpdate{Tags: &newTags}); err != nil {
+				t.Errorf("tags update on A%d: %v", i, err)
+			}
+		}()
+		links := []string{aIDs[i]}
+		go func() {
+			defer wg.Done()
+			if err := s.Update(ctx, bIDs[i], MemoryUpdate{LinkedIDs: &links}); err != nil {
+				t.Errorf("linking B%d->A%d: %v", i, i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	for i := 0; i < pairs; i++ {
+		a, err := s.GetByID(ctx, aIDs[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !containsID(a.LinkedIDs, bIDs[i]) {
+			t.Errorf("pair %d: expected A linked back to B despite a concurrent tags-only update, got %v", i, a.LinkedIDs)
+		}
+		if !containsID(a.Tags, "tag1") {
+			t.Errorf("pair %d: expected the concurrent tags update to also apply, got %v", i, a.Tags)
+		}
+	}
+}
+
+// TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink is the same
+// regression as above but for Update's re-embed branch (content changed),
+// which persists via a separate write path. Only one pair is used (unlike
+// the tags-only version above): running several content re-embeds
+// concurrently would race each other inside chromem-go's own collection
+// locking (a pre-existing issue in that dependency, unrelated to this bug),
+// which a single content-update goroutine paired with a links-only goroutine
+// (no chromem-go collection access) avoids.
+func TestLinks_ConcurrentContentUpdateDoesNotClobberConcurrentLink(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	aID, _ := s.Add(ctx, "A", "original", nil, nil)
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	newContent := "updated content"
+	go func() {
+		defer wg.Done()
+		if err := s.Update(ctx, aID, MemoryUpdate{Content: &newContent}); err != nil {
+			t.Errorf("content update on A: %v", err)
+		}
+	}()
+	links := []string{aID}
+	go func() {
+		defer wg.Done()
+		if err := s.Update(ctx, bID, MemoryUpdate{LinkedIDs: &links}); err != nil {
+			t.Errorf("linking B->A: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(a.LinkedIDs, bID) {
+		t.Errorf("expected A linked back to B despite a concurrent content update, got %v", a.LinkedIDs)
+	}
+	if a.Content != "updated content" {
+		t.Errorf("expected the concurrent content update to also apply, got %q", a.Content)
+	}
+}
+
+// TestCascadeUnlink_DoubleCallIsIdempotent guards against a regression where
+// cascadeUnlink errored on an already-removed id instead of no-op'ing,
+// breaking Delete's idempotency under a concurrent double-delete.
+func TestCascadeUnlink_DoubleCallIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	cs := s.(*chromemStore)
+
+	aID, _ := s.Add(ctx, "A", "a", nil, nil)
+
+	if err := cs.cascadeUnlink(aID); err != nil {
+		t.Fatalf("first cascadeUnlink: %v", err)
+	}
+	if err := cs.cascadeUnlink(aID); err != nil {
+		t.Errorf("second cascadeUnlink on an already-removed id should be a no-op, got error: %v", err)
+	}
+}

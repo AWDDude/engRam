@@ -121,6 +121,16 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("parsing config %s: %w", configPath, err)
 	}
 
+	// default_limit's zero value is also its documented "unlimited" meaning
+	// (see store.Search), so an explicit 0 must be distinguished from an
+	// omitted field via a separate presence check rather than parsed.DefaultLimit == 0.
+	var presence struct {
+		DefaultLimit *int `json:"default_limit"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return Config{}, fmt.Errorf("parsing config %s: %w", configPath, err)
+	}
+
 	var missing []string
 	if parsed.Model.Path == "" {
 		missing = append(missing, "model.path")
@@ -134,7 +144,7 @@ func Load() (Config, error) {
 	if parsed.DefaultMinScore == 0 {
 		missing = append(missing, "search.default_min_score")
 	}
-	if parsed.DefaultLimit == 0 {
+	if presence.DefaultLimit == nil {
 		missing = append(missing, "default_limit")
 	}
 	if len(missing) > 0 {
