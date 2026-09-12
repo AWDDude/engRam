@@ -17,6 +17,16 @@ make test     # go test -v -race ./...
 make clean    # remove binary
 ```
 
+## CLI
+
+`engram` with no args starts the MCP server on stdio. Subcommands: `version`
+(also `--version`/`-v`), `help` (also `--help`/`-h`), `export -f`, `import -f`,
+`reembed`. An unrecognised flag exits 2 instead of silently starting the server.
+
+Version lives in `cmd/engram/version.go` as a `var` that goreleaser overrides
+via `-X main.version={{ .Version }}`, so published binaries report their tag
+and source builds report the next intended release.
+
 ## Config
 
 Config file location (or override with `ENGRAM_CONFIG_PATH`):

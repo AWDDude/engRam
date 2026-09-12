@@ -105,6 +105,20 @@ engram reembed
 
 Re-embedding is atomic — the new model's database is fully built before the old one is removed. If it fails partway through, your existing memories are untouched.
 
+## CLI
+
+```bash
+engram                    # start the MCP server on stdio (default, no args)
+engram version            # print version, platform and Go toolchain
+engram help               # usage summary
+engram export -f <file>   # write all memories to CSV
+engram import -f <file>   # read memories from CSV
+engram reembed            # re-embed into a newly configured model
+```
+
+`--version`/`-v` and `--help`/`-h` work as aliases. An unrecognised flag exits
+with status 2 rather than starting the server.
+
 ## Export / import
 
 Back up all memories to a CSV file, or restore them from one:

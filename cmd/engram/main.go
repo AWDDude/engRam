@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
@@ -23,6 +24,21 @@ func main() {
 		case "import":
 			runImport()
 			return
+		case "version", "--version", "-v":
+			runVersion(os.Stdout)
+			return
+		case "help", "--help", "-h":
+			runUsage(os.Stdout)
+			return
+		}
+		// Anything else that looks like a flag is a mistake, not a memory
+		// server invocation. Falling through would silently start the MCP
+		// server and appear to hang, which is how `engram --version` used to
+		// behave before it was a real command.
+		if strings.HasPrefix(os.Args[1], "-") {
+			fmt.Fprintf(os.Stderr, "engram: unknown option %q\n\n", os.Args[1])
+			runUsage(os.Stderr)
+			os.Exit(2)
 		}
 	}
 
@@ -39,7 +55,7 @@ func main() {
 	}
 	defer cleanup()
 
-	s := mcpserver.NewMCPServer("engram", "1.0.0")
+	s := mcpserver.NewMCPServer("engram", version)
 	server.RegisterTools(s, server.NewApp(st, cfg.DefaultLimit, cfg.MaxContentChars))
 
 	if err := mcpserver.ServeStdio(s); err != nil {
