@@ -6,12 +6,16 @@ import (
 )
 
 const (
-	// chunkSizeWords is the max words per chunk (~200 tokens, safely below the
-	// 256-token limit of all-MiniLM-L6-v2 after accounting for special tokens).
-	chunkSizeWords = 200
+	// chunkSizeWords is the max words per chunk (~665 tokens, comfortably
+	// inside the 8192-token window of the default model). It is set well below
+	// that window on purpose: a distinctive passage gets diluted in a very
+	// long single embedding, so chunking still earns its place for genuinely
+	// large content. At this size a typical memory embeds as one vector and is
+	// never split at all.
+	chunkSizeWords = 512
 	// chunkOverlapWords is the number of words shared between adjacent chunks
 	// to preserve context at boundaries.
-	chunkOverlapWords = 30
+	chunkOverlapWords = 64
 )
 
 // Memory is the internal representation of a stored memory.

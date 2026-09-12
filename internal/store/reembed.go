@@ -18,7 +18,7 @@ import (
 // database file. Progress is written to w. Returns the number of memories
 // re-embedded.
 func Reembed(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
-	embFn, cleanup, err := newEmbeddingFunc(ctx, cfg.Model.Path, cfg.Model.EmbeddingModel)
+	embFn, cleanup, err := newEmbeddingFunc(ctx, cfg.Model.Path, cfg.Model.EmbeddingModel, cfg.Model.OnnxFilePath)
 	if err != nil {
 		return 0, fmt.Errorf("initializing new model: %w", err)
 	}

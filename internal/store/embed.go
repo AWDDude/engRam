@@ -34,8 +34,14 @@ func modelDownloadDir(modelDir, model string) string {
 // newEmbeddingFunc creates an embedding function backed by hugot's pure-Go
 // (GoMLX simplego) session. The model is downloaded once to modelDir on first
 // run and reused on subsequent starts.
+//
+// onnxFile names which .onnx file to take from the repo, relative to its root;
+// most repos ship several variants and the download is rejected as ambiguous
+// otherwise. hugot flattens the downloaded file to its basename on disk, which
+// is what the pipeline is then pointed at.
+//
 // The returned cleanup func must be called when the process exits.
-func newEmbeddingFunc(ctx context.Context, modelDir, model string) (EmbeddingFunc, func(), error) {
+func newEmbeddingFunc(ctx context.Context, modelDir, model, onnxFile string) (EmbeddingFunc, func(), error) {
 	// hugot resolves all file access through a FileSystem bound to the
 	// context; DownloadModel fails with "no filesystem bound to context"
 	// without this. A nil system selects hugot's default OS-backed one.
@@ -53,7 +59,10 @@ func newEmbeddingFunc(ctx context.Context, modelDir, model string) (EmbeddingFun
 		return nil, nil, fmt.Errorf("creating model dir: %w", err)
 	}
 
-	modelPath, err := hugot.DownloadModel(ctx, model, modelDir, hugot.NewDownloadOptions())
+	opts := hugot.NewDownloadOptions()
+	opts.OnnxFilePath = onnxFile
+
+	modelPath, err := hugot.DownloadModel(ctx, model, modelDir, opts)
 	if err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("downloading model %s: %w", model, err)
@@ -62,7 +71,7 @@ func newEmbeddingFunc(ctx context.Context, modelDir, model string) (EmbeddingFun
 	pipeline, err := hugot.NewPipeline(session, hugot.FeatureExtractionConfig{
 		ModelPath:    modelPath,
 		Name:         "embedding",
-		OnnxFilename: "model.onnx",
+		OnnxFilename: filepath.Base(onnxFile),
 		Options:      []hugot.FeatureExtractionOption{pipelines.WithNormalization()},
 	})
 	if err != nil {

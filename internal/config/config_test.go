@@ -187,7 +187,7 @@ func TestLoad_MissingFieldsTakeDefaults(t *testing.T) {
 		t.Errorf("default_limit = %d, want default %d", cfg.DefaultLimit, def.DefaultLimit)
 	}
 
-	want := []string{"model.embedding_model", "db.path", "default_limit"}
+	want := []string{"model.embedding_model", "model.onnx_file_path", "db.path", "default_limit", "max_content_chars"}
 	if !reflect.DeepEqual(defaulted, want) {
 		t.Errorf("defaulted fields = %v, want %v", defaulted, want)
 	}
@@ -197,9 +197,10 @@ func TestLoad_FullyPopulatedConfigReportsNoDefaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	data, _ := json.Marshal(map[string]any{
-		"model":         map[string]string{"path": "/m", "embedding_model": "custom/model"},
-		"db":            map[string]string{"path": "/db"},
-		"default_limit": 5,
+		"model":             map[string]any{"path": "/m", "embedding_model": "custom/model", "onnx_file_path": "onnx/model.onnx"},
+		"db":                map[string]string{"path": "/db"},
+		"default_limit":     5,
+		"max_content_chars": 1000,
 	})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -259,8 +260,8 @@ func TestLoad_EmptyObjectTakesAllDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg, Default()) {
 		t.Errorf("expected an empty config to equal Default(), got %+v", cfg)
 	}
-	if len(defaulted) != 4 {
-		t.Errorf("expected all 4 fields reported as defaulted, got %v", defaulted)
+	if len(defaulted) != 6 {
+		t.Errorf("expected all 6 fields reported as defaulted, got %v", defaulted)
 	}
 }
 
@@ -362,5 +363,46 @@ func TestLoad_DefaultLimit_Negative(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "default_limit") {
 		t.Errorf("expected error to mention default_limit, got: %v", err)
+	}
+}
+
+func TestLoad_OnnxFilePathAndMaxContentChars(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data, _ := json.Marshal(map[string]any{
+		"model":             map[string]any{"onnx_file_path": "onnx/model_fp16.onnx"},
+		"max_content_chars": 4096,
+	})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Model.OnnxFilePath != "onnx/model_fp16.onnx" {
+		t.Errorf("onnx_file_path = %q, want the explicitly set value", cfg.Model.OnnxFilePath)
+	}
+	if cfg.MaxContentChars != 4096 {
+		t.Errorf("max_content_chars = %d, want 4096", cfg.MaxContentChars)
+	}
+}
+
+func TestLoad_MaxContentCharsMustBePositive(t *testing.T) {
+	// 0 would reject every memory, so unlike default_limit it cannot mean
+	// "unlimited" — it can only be a mistake.
+	for _, bad := range []int{0, -1} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+		data, _ := json.Marshal(map[string]any{"max_content_chars": bad})
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := load(path); err == nil {
+			t.Errorf("expected max_content_chars %d to be rejected", bad)
+		} else if !strings.Contains(err.Error(), "max_content_chars") {
+			t.Errorf("expected the error to name the field, got: %v", err)
+		}
 	}
 }

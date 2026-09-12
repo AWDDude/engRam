@@ -7,7 +7,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 ## Features
 
 - **Single binary** — no Python, no Docker, no runtime dependencies
-- **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX ([all-MiniLM-L6-v2](https://huggingface.co/KnightsAnalytics/all-MiniLM-L6-v2), Apache 2.0, downloaded once on first run)
+- **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX ([jina-embeddings-v2-small-en](https://huggingface.co/jinaai/jina-embeddings-v2-small-en), 8192-token context, downloaded once on first run)
 - **Single-file storage** via [bbolt](https://github.com/etcd-io/bbolt) — records, vectors, and links in one ACID database
 - **5 MCP tools** — store, search, retrieve, update, delete
 - **Hybrid search** — vector similarity and BM25 keyword matching fused by Reciprocal Rank Fusion, so exact tokens and fuzzy recall both work
@@ -34,7 +34,7 @@ make build     # produces ./engram (static binary, CGO_ENABLED=0)
 
 Then copy the binary somewhere on your PATH, e.g. `~/.local/bin/`.
 
-> Internet access is required on first run to download the embedding model from Hugging Face (~90MB, one-time only).
+> Internet access is required on first run to download the embedding model from Hugging Face (~130MB, one-time only).
 
 ## MCP configuration
 
@@ -65,18 +65,24 @@ engRam uses XDG-style directories by default on all platforms:
 
 If the config file does not exist, engram creates it with defaults on first run. Every field is optional: any field you omit falls back to its default, and engram notes on stderr which defaults it used. Your config file is never rewritten, so a partial config managed by a dotfiles tool stays exactly as you wrote it. Malformed JSON, or an out-of-range value you did set, is still an error.
 
+`model.onnx_file_path` selects which `.onnx` file to take from the model repo, as a path relative to its root. Most repos publish several variants (fp32, fp16, quantized) and the download is rejected if the choice is ambiguous, so this must name one exactly — `model.onnx` for a file at the root, `onnx/model.onnx` for the common subdirectory layout. Change it whenever you change `embedding_model`.
+
+`max_content_chars` caps how much content a single memory may hold. It is a guardrail against pasted logs and whole documents, not a model limit: oversize content is chunked rather than rejected, so the real cost is a slow embed and a vaguer vector that retrieves *worse*. The default of 32768 is roughly one full context window of the default model. Set it higher if you genuinely store long documents; `0` is rejected, since it would reject every memory.
+
 `default_limit` sets the cap applied when a `search` call omits `limit`. Setting it to `0` makes uncapped the default for every search. Unlike the `limit` argument, a negative `default_limit` is rejected rather than treated as `0` — use `0` to mean uncapped here.
 
 ```json
 {
   "model": {
     "path": "/path/to/models",
-    "embedding_model": "KnightsAnalytics/all-MiniLM-L6-v2"
+    "embedding_model": "jinaai/jina-embeddings-v2-small-en",
+    "onnx_file_path": "model.onnx"
   },
   "db": {
     "path": "/path/to/db"
   },
-  "default_limit": 20
+  "default_limit": 20,
+  "max_content_chars": 32768
 }
 ```
 
@@ -87,7 +93,7 @@ If the config file does not exist, engram creates it with defaults on first run.
 If you change `model.embedding_model` in your config, engram will detect the mismatch on startup and return an error:
 
 ```
-engram: embedding model changed from "KnightsAnalytics/all-MiniLM-L6-v2" to "your/new-model"
+engram: embedding model changed from "jinaai/jina-embeddings-v2-small-en" to "your/new-model"
 — run 'engram reembed' to re-embed all memories
 ```
 
@@ -114,7 +120,7 @@ The CSV has columns `id, title, content, tags, linked_ids, created_at` (tags and
 
 | Tool | Required | Optional |
 |------|----------|----------|
-| `store` | `title` (≤100 chars), `content` | `tags`, `linked_ids` |
+| `store` | `title` (≤100 chars), `content` (≤`max_content_chars`) | `tags`, `linked_ids` |
 | `search` | `query` and/or `tag_filter` (at least one) | `limit` (omit for the configured default; `0` for no cap) |
 | `retrieve` | `memory_id` | — |
 | `delete` | `memory_id` | — |

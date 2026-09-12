@@ -16,13 +16,31 @@ const titleMaxLen = 100
 
 // App holds shared dependencies for all tool handlers.
 type App struct {
-	store        store.Store
-	defaultLimit int
+	store           store.Store
+	defaultLimit    int
+	maxContentChars int
 }
 
 // NewApp constructs an App with the given store and default search settings.
-func NewApp(s store.Store, defaultLimit int) *App {
-	return &App{store: s, defaultLimit: defaultLimit}
+func NewApp(s store.Store, defaultLimit, maxContentChars int) *App {
+	return &App{store: s, defaultLimit: defaultLimit, maxContentChars: maxContentChars}
+}
+
+// validateContent enforces the required, non-empty, size-capped rule shared by
+// store (always) and update (when content is patched at all). The cap is a
+// guardrail against pasted logs and whole documents: oversized content is
+// chunked rather than rejected by the model, so the cost is a slow embed and a
+// vaguer vector rather than a failure, which makes it worth catching here.
+func (a *App) validateContent(content string) error {
+	if content == "" {
+		return fmt.Errorf("content is required")
+	}
+	if n := utf8.RuneCountInString(content); n > a.maxContentChars {
+		return fmt.Errorf("content exceeds the %d character limit (got %d) — "+
+			"split it into separate linked memories, or raise max_content_chars in the config",
+			a.maxContentChars, n)
+	}
+	return nil
 }
 
 // validateTitle enforces the required, non-empty, <=titleMaxLen-character rule
@@ -77,8 +95,8 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 	if err := validateTitle(args.Title); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if args.Content == "" {
-		return mcp.NewToolResultError("content is required"), nil
+	if err := a.validateContent(args.Content); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	id, err := a.store.Add(ctx, args.Title, args.Content, args.Tags, args.LinkedIDs)
@@ -202,8 +220,10 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 	}
-	if args.Content != nil && *args.Content == "" {
-		return mcp.NewToolResultError("content cannot be empty"), nil
+	if args.Content != nil {
+		if err := a.validateContent(*args.Content); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 	}
 
 	patch := store.MemoryUpdate{

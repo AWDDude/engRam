@@ -6,7 +6,7 @@ MCP server for long-term semantic memory. Single statically-linked Go binary.
 
 - **Storage**: bbolt (embedded, single file, ACID transactions) — records, vectors, and links in one database
 - **Retrieval**: hybrid — brute-force cosine over stored vectors + in-memory BM25, fused by Reciprocal Rank Fusion
-- **Embeddings**: hugot + GoMLX simplego backend (`KnightsAnalytics/all-MiniLM-L6-v2`, downloaded once from Hugging Face, no external service)
+- **Embeddings**: hugot + GoMLX simplego backend (`jinaai/jina-embeddings-v2-small-en`, 512-dim, 8192-token window, downloaded once from Hugging Face, no external service)
 - **MCP transport**: stdio (mark3labs/mcp-go v0.50.0)
 
 ## Commands
@@ -27,30 +27,32 @@ Config file location (or override with `ENGRAM_CONFIG_PATH`):
 {
   "model": {
     "path": "/path/to/models",
-    "embedding_model": "KnightsAnalytics/all-MiniLM-L6-v2"
+    "embedding_model": "jinaai/jina-embeddings-v2-small-en",
+    "onnx_file_path": "model.onnx"
   },
   "db": {
     "path": "/path/to/db"
   },
-  "default_limit": 20
+  "default_limit": 20,
+  "max_content_chars": 32768
 }
 ```
 
-**Warning:** changing `model.embedding_model` invalidates the stored vectors — engram refuses to start and tells you to run `engram reembed`.
+**Warning:** changing `model.embedding_model` (or `model.onnx_file_path`) invalidates the stored vectors — engram refuses to start and tells you to run `engram reembed`.
 
 Missing config file → created with defaults on first run. Partial config → omitted fields take their default, reported on stderr; the file itself is never rewritten (it may be dotfiles-managed). Malformed JSON or an explicitly set out-of-range value → error and exit.
 
-On first run, the embedding model (`KnightsAnalytics/all-MiniLM-L6-v2`) is downloaded from Hugging Face to `model_dir`. Subsequent starts load it from disk with no network access.
+On first run, the embedding model (`jinaai/jina-embeddings-v2-small-en`) is downloaded from Hugging Face to `model.path`. Subsequent starts load it from disk with no network access.
 
 ## Data layout
 
 ```
 ~/.local/share/engram/   # all platforms ($XDG_DATA_HOME/engram if set)
 ├── models/
-│   └── KnightsAnalytics_all-MiniLM-L6-v2/   # downloaded on first run
+│   └── jinaai_jina-embeddings-v2-small-en/  # downloaded on first run
 └── db/
-    ├── db_meta.json                          # records the active embedding model
-    └── KnightsAnalytics_all-MiniLM-L6-v2.db  # bolt file, one per model
+    ├── db_meta.json                             # records the active embedding model
+    └── jinaai_jina-embeddings-v2-small-en.db    # bolt file, one per model
 ```
 
 The bolt file holds two buckets: `memories` (JSON records) and `vectors`

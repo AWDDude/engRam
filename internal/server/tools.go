@@ -41,7 +41,11 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 			),
 			mcp.WithString("content",
 				mcp.Required(),
-				mcp.Description("The content to store"),
+				mcp.Description(fmt.Sprintf(
+					"The content to store (max %d characters). Longer material belongs in "+
+						"several linked memories rather than one: a memory past this size is "+
+						"split into chunks and its embedding gets vaguer, making it harder to "+
+						"retrieve, not easier.", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
 				mcp.Description("Optional tags for categorization"),

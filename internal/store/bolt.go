@@ -94,7 +94,7 @@ func NewBoltStore(cfg config.Config) (Store, func(), error) {
 		return nil, nil, &ModelChangedError{OldModel: meta.ActiveModel, NewModel: cfg.Model.EmbeddingModel}
 	}
 
-	embFn, cleanup, err := newEmbeddingFunc(context.Background(), cfg.Model.Path, cfg.Model.EmbeddingModel)
+	embFn, cleanup, err := newEmbeddingFunc(context.Background(), cfg.Model.Path, cfg.Model.EmbeddingModel, cfg.Model.OnnxFilePath)
 	if err != nil {
 		return nil, nil, err
 	}
