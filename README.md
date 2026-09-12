@@ -65,6 +65,8 @@ engRam uses XDG-style directories by default on all platforms:
 
 If the config file does not exist, engram creates it with defaults on first run. Every field is optional: any field you omit falls back to its default, and engram notes on stderr which defaults it used. Your config file is never rewritten, so a partial config managed by a dotfiles tool stays exactly as you wrote it. Malformed JSON, or an out-of-range value you did set, is still an error.
 
+`default_limit` sets the cap applied when a `search` call omits `limit`. Setting it to `0` makes uncapped the default for every search. Unlike the `limit` argument, a negative `default_limit` is rejected rather than treated as `0` — use `0` to mean uncapped here.
+
 ```json
 {
   "model": {
@@ -113,7 +115,7 @@ The CSV has columns `id, title, content, tags, linked_ids, created_at` (tags and
 | Tool | Required | Optional |
 |------|----------|----------|
 | `store` | `title` (≤100 chars), `content` | `tags`, `linked_ids` |
-| `search` | `query` and/or `tag_filter` (at least one) | `limit` (default from config; 0/negative = unlimited) |
+| `search` | `query` and/or `tag_filter` (at least one) | `limit` (omit for the configured default; `0` for no cap) |
 | `retrieve` | `memory_id` | — |
 | `delete` | `memory_id` | — |
 | `update` | `memory_id`, plus at least one of `title`, `content`, `tags`, `linked_ids` | — |
@@ -126,6 +128,17 @@ half-remembered exact token (an identifier, an error string, a name) that
 embeddings alone tend to smooth over; titles and tags are weighted above body
 text. Results are ranked by relevance and cut off relative to the best match,
 so there is no similarity threshold to configure.
+
+`limit` caps how many ranked results come back. Omitting it applies the
+configured `default_limit`; passing `0` removes the cap entirely and returns
+every match (a negative value does the same). Note that this is the opposite
+of the usual convention — **omitting `limit` is the capped option, `0` is the
+uncapped one.**
+
+Because weak matches are dropped by the relevance cutoff *before* `limit` is
+applied, a search often returns fewer results than the limit allows. That is
+the expected outcome for a narrow query, not a sign the limit was set too low;
+raising it will not surface the dropped matches.
 
 `search` returns only `{id, title, tags}` per match — use `retrieve` for full
 details, including the id/title/tags of linked memories.

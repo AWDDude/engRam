@@ -1,9 +1,34 @@
 package server
 
 import (
+	"fmt"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
+
+// searchLimitDescription documents the limit argument, naming the actual
+// configured default rather than an abstract "the default".
+//
+// Two things are easy to get backwards and so are stated outright: omitting
+// the argument is the capped option while 0 is the uncapped one (the reverse
+// of the usual "leave it blank for everything" convention), and a short result
+// list is expected rather than a sign the limit was too low, since weak
+// matches are dropped by relevance before the limit is ever applied.
+func searchLimitDescription(defaultLimit int) string {
+	capped := fmt.Sprintf("%d", defaultLimit)
+	if defaultLimit <= 0 {
+		capped = "no cap, as configured"
+	}
+	return fmt.Sprintf(
+		"Maximum results to return. Omit to use the configured default (%s). "+
+			"Pass 0 to remove the cap and return every match; negative values behave the same as 0. "+
+			"Note that omitting this argument is the capped option and 0 is the uncapped one. "+
+			"Getting back fewer results than the limit is normal and does not mean the limit was too low: "+
+			"low-relevance matches are dropped before the limit is applied, so raising it will not surface them.",
+		capped,
+	)
+}
 
 // RegisterTools registers all MCP tools on the given server.
 func RegisterTools(s *mcpserver.MCPServer, app *App) {
@@ -40,7 +65,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("Filter by tag (case-insensitive substring match)"),
 			),
 			mcp.WithInteger("limit",
-				mcp.Description("Maximum results to return (omitted = configured default; 0 or negative = unlimited)"),
+				mcp.Description(searchLimitDescription(app.defaultLimit)),
 			),
 		),
 		app.handleSearchMemory,

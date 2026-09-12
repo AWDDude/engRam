@@ -79,9 +79,11 @@ internal/server/     # App + MCP handlers + RegisterTools
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
 | `store` | title (≤100 chars), content | tags, linked_ids |
-| `search` | query and/or tag_filter (at least one) | limit (default from config; 0/negative = unlimited) |
+| `search` | query and/or tag_filter (at least one) | limit (omit = configured default; 0 = no cap) |
 | `retrieve` | memory_id | — |
 | `delete` | memory_id | — |
 | `update` | memory_id, plus at least one of: title, content, tags, linked_ids | — |
 
-`search` is hybrid: dense vector similarity and lexical BM25 fused by Reciprocal Rank Fusion, with titles and tags weighted above body text. Results are ranked and cut off relative to the best match, so there is no similarity threshold to configure. It returns only `{id, title, tags}` per match; use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.
+`search` is hybrid: dense vector similarity and lexical BM25 fused by Reciprocal Rank Fusion, with titles and tags weighted above body text. Results are ranked and cut off relative to the best match, so there is no similarity threshold to configure.
+
+`limit` inverts the usual convention: **omitting it caps results** at `default_limit`, while **passing 0 removes the cap** (negative behaves as 0). The relevance cutoff runs *before* `limit`, so fewer results than the limit is the normal outcome for a narrow query — raising the limit will not surface the dropped matches. In config, `default_limit: 0` makes uncapped the default, but a negative `default_limit` is rejected rather than treated as 0. It returns only `{id, title, tags}` per match; use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.
