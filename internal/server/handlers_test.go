@@ -54,9 +54,10 @@ func (m *mockStore) Search(_ context.Context, query, tagFilter string, _ float32
 			continue
 		}
 		if tagFilter != "" {
+			// Case-insensitive, matching store.hasMatchingTag's production semantics.
 			matched := false
 			for _, tag := range mem.Tags {
-				if strings.Contains(tag, tagFilter) {
+				if strings.Contains(strings.ToLower(tag), strings.ToLower(tagFilter)) {
 					matched = true
 					break
 				}
@@ -354,6 +355,29 @@ func TestHandleSearchMemory_TagFilterOnly(t *testing.T) {
 	}
 }
 
+func TestHandleSearchMemory_TagFilterIsCaseInsensitive(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "Kubernetes fact", Content: "kubernetes fact", Tags: []string{"Kubernetes", "infra"}}
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{"tag_filter": "KUBERNETES"})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var results []store.SearchResult
+	if err := json.Unmarshal([]byte(resultText(t, result)), &results); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(results) != 1 || results[0].ID != "a" {
+		t.Errorf("expected a case-insensitive tag_filter to still match, got %d results", len(results))
+	}
+}
+
 func TestHandleSearchMemory_RequiresQueryOrTagFilter(t *testing.T) {
 	app := &App{store: newMockStore()}
 	req := makeRequest(map[string]any{})
@@ -595,6 +619,33 @@ func TestHandleRetrieveMemory_SkipsDanglingLinkGracefully(t *testing.T) {
 	}
 	if len(got.Linked) != 0 {
 		t.Errorf("expected dangling link skipped, got %v", got.Linked)
+	}
+}
+
+func TestHandleRetrieveMemory_FiltersSelfAndDuplicateLinks(t *testing.T) {
+	// A corrupted/hand-edited DB (e.g. via CSV import, which writes
+	// linked_ids verbatim without normalizeLinks) could contain a
+	// self-reference or a duplicate id; retrieve must not surface either.
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", LinkedIDs: []string{"a", "b", "b"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "content b"}
+	app := &App{store: ms}
+
+	req := makeRequest(map[string]any{"memory_id": "a"})
+	result, err := app.handleRetrieveMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var got store.RetrieveResult
+	if err := json.Unmarshal([]byte(resultText(t, result)), &got); err != nil {
+		t.Fatalf("parsing result: %v", err)
+	}
+	if len(got.Linked) != 1 || got.Linked[0].ID != "b" {
+		t.Errorf("expected exactly one linked entry (b), with self-reference and duplicate dropped, got %v", got.Linked)
 	}
 }
 

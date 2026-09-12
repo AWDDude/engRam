@@ -615,17 +615,7 @@ func (s *chromemStore) syncLinks(id string, newLinks []string) ([]string, error)
 				s.meta.setRaw(peer)
 			}
 		}
-		for _, peerID := range target.LinkedIDs {
-			if newSet[peerID] {
-				continue // still linked, leave the peer alone
-			}
-			peer, ok := s.meta.getRaw(peerID)
-			if !ok {
-				continue // peer already gone, nothing to clean up
-			}
-			peer.LinkedIDs = removeString(peer.LinkedIDs, id)
-			s.meta.setRaw(peer)
-		}
+		unlinkFromPeers(s.meta, id, target.LinkedIDs, newSet)
 
 		target.LinkedIDs = normalized
 		s.meta.setRaw(target)
@@ -649,15 +639,27 @@ func (s *chromemStore) cascadeUnlink(id string) error {
 			// missing key, so a racing double-delete stays idempotent.
 			return nil
 		}
-		for _, peerID := range target.LinkedIDs {
-			peer, ok := s.meta.getRaw(peerID)
-			if !ok {
-				continue
-			}
-			peer.LinkedIDs = removeString(peer.LinkedIDs, id)
-			s.meta.setRaw(peer)
-		}
+		unlinkFromPeers(s.meta, id, target.LinkedIDs, nil)
 		s.meta.removeRaw(id)
 		return nil
 	})
+}
+
+// unlinkFromPeers removes id from the LinkedIDs of each peer in peerIDs,
+// skipping any peer present in keep (nil keep skips none). Shared by
+// syncLinks (which keeps peers still present in the new link set) and
+// cascadeUnlink (which keeps none, since id is being deleted entirely).
+// Must be called while holding m's write lock (see withLock).
+func unlinkFromPeers(m *metaIndex, id string, peerIDs []string, keep map[string]bool) {
+	for _, peerID := range peerIDs {
+		if keep[peerID] {
+			continue
+		}
+		peer, ok := m.getRaw(peerID)
+		if !ok {
+			continue // peer already gone, nothing to clean up
+		}
+		peer.LinkedIDs = removeString(peer.LinkedIDs, id)
+		m.setRaw(peer)
+	}
 }

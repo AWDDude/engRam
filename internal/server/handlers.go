@@ -144,7 +144,15 @@ func (a *App) handleRetrieveMemory(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	linked := make([]store.SearchResult, 0, len(mem.LinkedIDs))
+	seen := make(map[string]bool, len(mem.LinkedIDs))
 	for _, linkedID := range mem.LinkedIDs {
+		// Defense-in-depth: a hand-edited/imported DB could contain a
+		// self-reference or a duplicate id, which the normal write path
+		// (normalizeLinks) never produces — skip rather than surface either.
+		if linkedID == mem.ID || seen[linkedID] {
+			continue
+		}
+		seen[linkedID] = true
 		linkedMem, err := a.store.GetByID(ctx, linkedID)
 		if err != nil {
 			// Defense-in-depth: a dangling reference (e.g. hand-edited DB)
