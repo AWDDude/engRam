@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -12,6 +15,21 @@ import (
 // EmbeddingFunc turns text into a vector. Implementations are expected to
 // return unit-normalized vectors (the hugot pipeline below does).
 type EmbeddingFunc func(ctx context.Context, text string) ([]float32, error)
+
+// modelDownloadDir returns the directory hugot will copy a model's files into,
+// mirroring the naming in hugot's downloader: anything after a ":" is dropped
+// and "/" becomes "_".
+//
+// We have to know this path because hugot's DownloadModel writes into it
+// without creating it first, so the download fails on any machine that
+// doesn't already have the directory — which is every fresh install.
+func modelDownloadDir(modelDir, model string) string {
+	name := model
+	if i := strings.Index(name, ":"); i >= 0 {
+		name = name[:i]
+	}
+	return filepath.Join(modelDir, strings.ReplaceAll(name, "/", "_"))
+}
 
 // newEmbeddingFunc creates an embedding function backed by hugot's pure-Go
 // (GoMLX simplego) session. The model is downloaded once to modelDir on first
@@ -28,6 +46,12 @@ func newEmbeddingFunc(ctx context.Context, modelDir, model string) (EmbeddingFun
 		return nil, nil, fmt.Errorf("creating embedding session: %w", err)
 	}
 	cleanup := func() { _ = session.Destroy() }
+
+	// Must exist before DownloadModel runs; see modelDownloadDir.
+	if err := os.MkdirAll(modelDownloadDir(modelDir, model), 0o755); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("creating model dir: %w", err)
+	}
 
 	modelPath, err := hugot.DownloadModel(ctx, model, modelDir, hugot.NewDownloadOptions())
 	if err != nil {
