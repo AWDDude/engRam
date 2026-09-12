@@ -4,41 +4,59 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/AWDDude/engRam/internal/store"
 )
 
+// titleMaxLen is the hard, non-configurable cap on a memory's title.
+const titleMaxLen = 100
+
 // App holds shared dependencies for all tool handlers.
 type App struct {
 	store           store.Store
 	defaultMinScore float32
+	defaultLimit    int
 }
 
-// NewApp constructs an App with the given store and default search threshold.
-func NewApp(s store.Store, defaultMinScore float32) *App {
-	return &App{store: s, defaultMinScore: defaultMinScore}
+// NewApp constructs an App with the given store and default search settings.
+func NewApp(s store.Store, defaultMinScore float32, defaultLimit int) *App {
+	return &App{store: s, defaultMinScore: defaultMinScore, defaultLimit: defaultLimit}
+}
+
+// validateTitle enforces the required, non-empty, <=titleMaxLen-character rule
+// shared by store (always) and update (when a title is provided at all).
+func validateTitle(title string) error {
+	if title == "" {
+		return fmt.Errorf("title is required")
+	}
+	if n := utf8.RuneCountInString(title); n > titleMaxLen {
+		return fmt.Errorf("title exceeds %d characters (got %d)", titleMaxLen, n)
+	}
+	return nil
 }
 
 // Argument structs — one per tool. BindArguments unmarshals the MCP request
 // into these, giving us typed access and zero boilerplate per-handler.
 
 type storeMemoryArgs struct {
-	Content string   `json:"content"`
-	Type    string   `json:"type"`
-	Tags    []string `json:"tags"`
+	Title     string   `json:"title"`
+	Content   string   `json:"content"`
+	Tags      []string `json:"tags"`
+	LinkedIDs []string `json:"linked_ids"`
 }
 
 type searchMemoryArgs struct {
-	Query    string   `json:"query"`
-	MinScore *float64 `json:"min_score"`
+	Query     string   `json:"query"`
+	TagFilter string   `json:"tag_filter"`
+	MinScore  *float64 `json:"min_score"`
+	Limit     *int     `json:"limit"`
 }
 
-type listMemoriesArgs struct {
-	TypeFilter string `json:"type_filter"`
-	TagFilter  string `json:"tag_filter"`
-	Limit      int    `json:"limit"`
+type retrieveMemoryArgs struct {
+	MemoryID string `json:"memory_id"`
 }
 
 type deleteMemoryArgs struct {
@@ -46,8 +64,11 @@ type deleteMemoryArgs struct {
 }
 
 type updateMemoryArgs struct {
-	MemoryID string `json:"memory_id"`
-	Content  string `json:"content"`
+	MemoryID  string    `json:"memory_id"`
+	Title     *string   `json:"title"`
+	Content   *string   `json:"content"`
+	Tags      *[]string `json:"tags"`
+	LinkedIDs *[]string `json:"linked_ids"`
 }
 
 func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -55,18 +76,21 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 	if err := req.BindArguments(&args); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid arguments: %v", err)), nil
 	}
+	if err := validateTitle(args.Title); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	if args.Content == "" {
 		return mcp.NewToolResultError("content is required"), nil
 	}
-	if args.Type == "" {
-		return mcp.NewToolResultError("type is required"), nil
-	}
-	if !validMemoryType(args.Type) {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid type %q: must be one of %v", args.Type, memoryTypes)), nil
-	}
 
-	id, err := a.store.Add(ctx, args.Content, args.Type, args.Tags)
+	id, err := a.store.Add(ctx, args.Title, args.Content, args.Tags, args.LinkedIDs)
 	if err != nil {
+		if id != "" {
+			// The memory was persisted but linking failed partway through
+			// (see store.Add); surface the id so the caller can still
+			// retrieve/update/delete it instead of losing track of it.
+			return mcp.NewToolResultError(fmt.Sprintf("store error: %v (memory was created with id %q)", err, id)), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(`{"id":%q,"status":"stored"}`, id)), nil
@@ -77,19 +101,25 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if err := req.BindArguments(&args); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid arguments: %v", err)), nil
 	}
-	if args.Query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+	if args.Query == "" && args.TagFilter == "" {
+		return mcp.NewToolResultError("at least one of query or tag_filter is required"), nil
 	}
+
 	minScore := a.defaultMinScore
 	if args.MinScore != nil {
 		minScore = float32(*args.MinScore)
 	}
-	results, err := a.store.Search(ctx, args.Query, minScore)
+	limit := a.defaultLimit
+	if args.Limit != nil {
+		limit = *args.Limit
+	}
+
+	results, err := a.store.Search(ctx, args.Query, args.TagFilter, minScore, limit)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}
 	if results == nil {
-		results = []store.MemoryResult{}
+		results = []store.SearchResult{}
 	}
 
 	out, err := json.Marshal(results)
@@ -99,25 +129,48 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	return mcp.NewToolResultText(string(out)), nil
 }
 
-func (a *App) handleListMemories(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	var args listMemoriesArgs
+func (a *App) handleRetrieveMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var args retrieveMemoryArgs
 	if err := req.BindArguments(&args); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid arguments: %v", err)), nil
 	}
-	limit := args.Limit
-	if limit <= 0 {
-		limit = 20
+	if args.MemoryID == "" {
+		return mcp.NewToolResultError("memory_id is required"), nil
 	}
 
-	memories, err := a.store.List(ctx, args.TypeFilter, args.TagFilter, limit)
+	mem, err := a.store.GetByID(ctx, args.MemoryID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("list error: %v", err)), nil
-	}
-	if memories == nil {
-		memories = []store.Memory{}
+		return mcp.NewToolResultError(fmt.Sprintf("retrieve error: %v", err)), nil
 	}
 
-	out, err := json.Marshal(memories)
+	linked := make([]store.SearchResult, 0, len(mem.LinkedIDs))
+	seen := make(map[string]bool, len(mem.LinkedIDs))
+	for _, linkedID := range mem.LinkedIDs {
+		// Defense-in-depth: a hand-edited/imported DB could contain a
+		// self-reference or a duplicate id, which the normal write path
+		// (normalizeLinks) never produces — skip rather than surface either.
+		if linkedID == mem.ID || seen[linkedID] {
+			continue
+		}
+		seen[linkedID] = true
+		linkedMem, err := a.store.GetByID(ctx, linkedID)
+		if err != nil {
+			// Defense-in-depth: a dangling reference (e.g. hand-edited DB)
+			// shouldn't make retrieve unusable — skip it rather than error.
+			continue
+		}
+		linked = append(linked, store.SearchResult{ID: linkedMem.ID, Title: linkedMem.Title, Tags: linkedMem.Tags})
+	}
+
+	result := store.RetrieveResult{
+		ID:        mem.ID,
+		Title:     mem.Title,
+		Content:   mem.Content,
+		Tags:      mem.Tags,
+		CreatedAt: mem.CreatedAt,
+		Linked:    linked,
+	}
+	out, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
 	}
@@ -147,11 +200,25 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if args.MemoryID == "" {
 		return mcp.NewToolResultError("memory_id is required"), nil
 	}
-	if args.Content == "" {
-		return mcp.NewToolResultError("content is required"), nil
+	if args.Title == nil && args.Content == nil && args.Tags == nil && args.LinkedIDs == nil {
+		return mcp.NewToolResultError("at least one of title, content, tags, or linked_ids is required"), nil
+	}
+	if args.Title != nil {
+		if err := validateTitle(*args.Title); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
+	if args.Content != nil && *args.Content == "" {
+		return mcp.NewToolResultError("content cannot be empty"), nil
 	}
 
-	if err := a.store.Update(ctx, args.MemoryID, args.Content); err != nil {
+	patch := store.MemoryUpdate{
+		Title:     args.Title,
+		Content:   args.Content,
+		Tags:      args.Tags,
+		LinkedIDs: args.LinkedIDs,
+	}
+	if err := a.store.Update(ctx, args.MemoryID, patch); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(`{"id":%q,"status":"updated"}`, args.MemoryID)), nil

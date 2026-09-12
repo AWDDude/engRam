@@ -5,33 +5,25 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-var memoryTypes = []string{"preference", "task", "fact", "action"}
-
-func validMemoryType(t string) bool {
-	for _, mt := range memoryTypes {
-		if mt == t {
-			return true
-		}
-	}
-	return false
-}
-
-// RegisterTools registers all five MCP tools on the given server.
+// RegisterTools registers all MCP tools on the given server.
 func RegisterTools(s *mcpserver.MCPServer, app *App) {
 	s.AddTool(
 		mcp.NewTool("store",
 			mcp.WithDescription("Store a new memory in engram"),
+			mcp.WithString("title",
+				mcp.Required(),
+				mcp.Description("A short title/summary for the memory (max 100 characters)"),
+			),
 			mcp.WithString("content",
 				mcp.Required(),
 				mcp.Description("The content to store"),
 			),
-			mcp.WithString("type",
-				mcp.Required(),
-				mcp.Description("Memory type"),
-				mcp.Enum(memoryTypes...),
-			),
 			mcp.WithArray("tags",
 				mcp.Description("Optional tags for categorization"),
+				mcp.WithStringItems(),
+			),
+			mcp.WithArray("linked_ids",
+				mcp.Description("Optional IDs of other memories to link to (linking is bidirectional)"),
 				mcp.WithStringItems(),
 			),
 		),
@@ -40,33 +32,32 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("search",
-			mcp.WithDescription("Semantically search stored memories using vector similarity"),
+			mcp.WithDescription("Search stored memories by semantic query and/or tag filter. At least one of query or tag_filter is required. Returns only id, title, and tags for each match — use retrieve for full details."),
 			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("The search query"),
+				mcp.Description("Semantic search query (matches title and content)"),
+			),
+			mcp.WithString("tag_filter",
+				mcp.Description("Filter by tag (case-insensitive substring match)"),
 			),
 			mcp.WithNumber("min_score",
-				mcp.Description("Minimum cosine similarity threshold (0–1, overrides the configured default)"),
+				mcp.Description("Minimum cosine similarity threshold (0–1); only applies when query is given; overrides the configured default"),
+			),
+			mcp.WithInteger("limit",
+				mcp.Description("Maximum results to return (omitted = configured default; 0 or negative = unlimited)"),
 			),
 		),
 		app.handleSearchMemory,
 	)
 
 	s.AddTool(
-		mcp.NewTool("list",
-			mcp.WithDescription("List stored memories with optional type and tag filtering"),
-			mcp.WithString("type_filter",
-				mcp.Description("Filter by memory type"),
-				mcp.Enum(memoryTypes...),
-			),
-			mcp.WithString("tag_filter",
-				mcp.Description("Filter by tag (case-insensitive substring match)"),
-			),
-			mcp.WithInteger("limit",
-				mcp.Description("Maximum results to return (default 20)"),
+		mcp.NewTool("retrieve",
+			mcp.WithDescription("Retrieve full details of a memory by ID, including titles and tags of any linked memories"),
+			mcp.WithString("memory_id",
+				mcp.Required(),
+				mcp.Description("The ID of the memory to retrieve"),
 			),
 		),
-		app.handleListMemories,
+		app.handleRetrieveMemory,
 	)
 
 	s.AddTool(
@@ -82,14 +73,24 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("update",
-			mcp.WithDescription("Update the content of an existing memory and re-embed it"),
+			mcp.WithDescription("Update an existing memory. Only the provided fields are changed; at least one must be given."),
 			mcp.WithString("memory_id",
 				mcp.Required(),
 				mcp.Description("The ID of the memory to update"),
 			),
+			mcp.WithString("title",
+				mcp.Description("New title (max 100 characters)"),
+			),
 			mcp.WithString("content",
-				mcp.Required(),
-				mcp.Description("The new content (type and tags are preserved)"),
+				mcp.Description("New content"),
+			),
+			mcp.WithArray("tags",
+				mcp.Description("New tags (replaces the existing set)"),
+				mcp.WithStringItems(),
+			),
+			mcp.WithArray("linked_ids",
+				mcp.Description("New linked memory IDs (replaces the existing set; linking is bidirectional)"),
+				mcp.WithStringItems(),
 			),
 		),
 		app.handleUpdateMemory,

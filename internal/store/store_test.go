@@ -53,7 +53,7 @@ func TestStore_Add(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "David uses Go for systems work", "fact", []string{"go", "work"})
+	id, err := s.Add(ctx, "Go for systems work", "David uses Go for systems work", []string{"go", "work"}, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestStore_AddAndGetByID(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "prefers dark mode", "preference", []string{"ui"})
+	id, err := s.Add(ctx, "Editor preference", "prefers dark mode", []string{"ui"}, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -75,17 +75,48 @@ func TestStore_AddAndGetByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
 	}
+	if mem.Title != "Editor preference" {
+		t.Errorf("expected title 'Editor preference', got %q", mem.Title)
+	}
 	if mem.Content != "prefers dark mode" {
 		t.Errorf("expected content 'prefers dark mode', got %q", mem.Content)
-	}
-	if mem.Type != "preference" {
-		t.Errorf("expected type 'preference', got %q", mem.Type)
 	}
 	if len(mem.Tags) != 1 || mem.Tags[0] != "ui" {
 		t.Errorf("unexpected tags: %v", mem.Tags)
 	}
 	if mem.CreatedAt == "" {
 		t.Error("expected non-empty CreatedAt")
+	}
+	if len(mem.LinkedIDs) != 0 {
+		t.Errorf("expected no linked IDs, got %v", mem.LinkedIDs)
+	}
+}
+
+func TestStore_Add_TitleAndContentTrustedAsGiven(t *testing.T) {
+	// The store layer performs no validation (required-ness, length caps) —
+	// that's enforced at the MCP handler layer. This locks in the boundary.
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	longTitle := strings.Repeat("x", 500)
+	id, err := s.Add(ctx, "", "content with an empty and an overlong title elsewhere", nil, nil)
+	if err != nil {
+		t.Fatalf("expected store to accept an empty title, got error: %v", err)
+	}
+	if _, err := s.GetByID(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	id2, err := s.Add(ctx, longTitle, "content", nil, nil)
+	if err != nil {
+		t.Fatalf("expected store to accept an overlong title, got error: %v", err)
+	}
+	mem, err := s.GetByID(ctx, id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Title != longTitle {
+		t.Errorf("expected overlong title to be stored verbatim, got %q", mem.Title)
 	}
 }
 
@@ -103,7 +134,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", 0)
+	results, err := s.Search(ctx, "anything", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -116,14 +147,14 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "David prefers the terminal over GUIs", "preference", nil); err != nil {
+	if _, err := s.Add(ctx, "Terminal preference", "David prefers the terminal over GUIs", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "David is a Kubernetes administrator", "fact", nil); err != nil {
+	if _, err := s.Add(ctx, "Kubernetes fact", "David is a Kubernetes administrator", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", 0)
+	results, err := s.Search(ctx, "terminal preferences", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -131,92 +162,111 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Error("expected at least one result")
 	}
 	for _, r := range results {
-		if r.Score == 0 {
-			t.Error("expected non-zero similarity score")
+		if r.ID == "" || r.Title == "" {
+			t.Errorf("expected id and title on result, got %+v", r)
 		}
 	}
 }
 
-
-func TestStore_List_All(t *testing.T) {
+func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "memory one", "fact", nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Add(ctx, "memory two", "preference", nil); err != nil {
+	if _, err := s.Add(ctx, "Some title", "some content", []string{"a"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	mems, err := s.List(ctx, "", "", 0)
+	results, err := s.Search(ctx, "some content", "", 0, 0)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
-	if len(mems) != 2 {
-		t.Errorf("expected 2 memories, got %d", len(mems))
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Title != "Some title" {
+		t.Errorf("expected title 'Some title', got %q", results[0].Title)
+	}
+	if len(results[0].Tags) != 1 || results[0].Tags[0] != "a" {
+		t.Errorf("expected tags [a], got %v", results[0].Tags)
 	}
 }
 
-func TestStore_List_TypeFilter(t *testing.T) {
+func TestStore_Search_TagOnly(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "a fact", "fact", nil); err != nil {
+	if _, err := s.Add(ctx, "Kubernetes fact", "uses kubernetes", []string{"kubernetes", "infra"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "a preference", "preference", nil); err != nil {
+	if _, err := s.Add(ctx, "Go preference", "prefers Go", []string{"golang"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	mems, err := s.List(ctx, "fact", "", 0)
+	results, err := s.Search(ctx, "", "KUBE", 0, 0)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
-	if len(mems) != 1 {
-		t.Errorf("expected 1 result, got %d", len(mems))
-	}
-	if mems[0].Type != "fact" {
-		t.Errorf("expected type 'fact', got %q", mems[0].Type)
+	if len(results) != 1 {
+		t.Errorf("expected 1 result for tag filter, got %d", len(results))
 	}
 }
 
-func TestStore_List_TagFilter(t *testing.T) {
+func TestStore_Search_TagOnly_All(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	if _, err := s.Add(ctx, "uses kubernetes", "fact", []string{"kubernetes", "infra"}); err != nil {
+	if _, err := s.Add(ctx, "Memory one", "memory one", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add(ctx, "prefers Go", "fact", []string{"golang"}); err != nil {
+	if _, err := s.Add(ctx, "Memory two", "memory two", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	mems, err := s.List(ctx, "", "KUBE", 0)
+	results, err := s.Search(ctx, "", "", 0, 0)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
-	if len(mems) != 1 {
-		t.Errorf("expected 1 result for tag filter, got %d", len(mems))
+	if len(results) != 2 {
+		t.Errorf("expected 2 memories, got %d", len(results))
 	}
 }
 
-func TestStore_List_Limit(t *testing.T) {
+func TestStore_Search_TagOnly_Limit(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
 	for i := 0; i < 5; i++ {
-		if _, err := s.Add(ctx, "memory", "fact", nil); err != nil {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory %d", i), "memory", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	mems, err := s.List(ctx, "", "", 3)
+	results, err := s.Search(ctx, "", "", 0, 3)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("Search: %v", err)
 	}
-	if len(mems) != 3 {
-		t.Errorf("expected 3 results with limit, got %d", len(mems))
+	if len(results) != 3 {
+		t.Errorf("expected 3 results with limit, got %d", len(results))
+	}
+}
+
+func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Kubernetes notes", "cluster admin notes", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Kubernetes other notes", "cluster admin notes", []string{"golang"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("expected query+tag_filter to narrow to 1 result, got %d", len(results))
 	}
 }
 
@@ -224,7 +274,7 @@ func TestStore_Delete(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "to be deleted", "fact", nil)
+	id, err := s.Add(ctx, "To be deleted", "to be deleted", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,16 +295,17 @@ func TestStore_Delete_NotFound(t *testing.T) {
 	}
 }
 
-func TestStore_Update(t *testing.T) {
+func TestStore_Update_ContentOnly(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "original content", "fact", []string{"tag1"})
+	id, err := s.Add(ctx, "Original title", "original content", []string{"tag1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := s.Update(ctx, id, "updated content"); err != nil {
+	newContent := "updated content"
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -262,14 +313,66 @@ func TestStore_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByID after update: %v", err)
 	}
-	if mem.Content != "updated content" {
+	if mem.Content != newContent {
 		t.Errorf("expected updated content, got %q", mem.Content)
+	}
+	if mem.Title != "Original title" {
+		t.Errorf("title should be preserved, got %q", mem.Title)
 	}
 	if len(mem.Tags) != 1 || mem.Tags[0] != "tag1" {
 		t.Errorf("tags not preserved after update: %v", mem.Tags)
 	}
-	if mem.Type != "fact" {
-		t.Errorf("type not preserved after update: %q", mem.Type)
+}
+
+func TestStore_Update_TitleOnly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Original title", "original content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTitle := "New title"
+	if err := s.Update(ctx, id, MemoryUpdate{Title: &newTitle}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Title != newTitle {
+		t.Errorf("expected updated title, got %q", mem.Title)
+	}
+	if mem.Content != "original content" {
+		t.Errorf("content should be preserved, got %q", mem.Content)
+	}
+}
+
+func TestStore_Update_TagsOnly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"old"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTags := []string{"new", "tags"}
+	if err := s.Update(ctx, id, MemoryUpdate{Tags: &newTags}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 2 || mem.Tags[0] != "new" || mem.Tags[1] != "tags" {
+		t.Errorf("expected tags replaced, got %v", mem.Tags)
+	}
+	if mem.Title != "Title" || mem.Content != "content" {
+		t.Errorf("title/content should be preserved, got %q / %q", mem.Title, mem.Content)
 	}
 }
 
@@ -277,39 +380,10 @@ func TestStore_Update_NotFound(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	err := s.Update(ctx, "nonexistent-id", "new content")
+	newContent := "new content"
+	err := s.Update(ctx, "nonexistent-id", MemoryUpdate{Content: &newContent})
 	if err == nil {
 		t.Error("expected error updating nonexistent memory, got nil")
-	}
-}
-
-func TestStore_Add_TaskAndActionTypes(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-
-	taskID, err := s.Add(ctx, "refactor the auth module", "task", []string{"auth"})
-	if err != nil {
-		t.Fatalf("Add task: %v", err)
-	}
-	actionID, err := s.Add(ctx, "created PR #42 fixing login bug", "action", []string{"pr", "bugfix"})
-	if err != nil {
-		t.Fatalf("Add action: %v", err)
-	}
-
-	task, err := s.GetByID(ctx, taskID)
-	if err != nil {
-		t.Fatalf("GetByID task: %v", err)
-	}
-	if task.Type != "task" {
-		t.Errorf("expected type 'task', got %q", task.Type)
-	}
-
-	action, err := s.GetByID(ctx, actionID)
-	if err != nil {
-		t.Fatalf("GetByID action: %v", err)
-	}
-	if action.Type != "action" {
-		t.Errorf("expected type 'action', got %q", action.Type)
 	}
 }
 
@@ -327,7 +401,7 @@ func TestStore_Chunking_LargeContentStoredAndRetrieved(t *testing.T) {
 	s := newTestStore(t)
 
 	content := largeContent(chunkSizeWords + 50)
-	id, err := s.Add(ctx, content, "fact", []string{"large"})
+	id, err := s.Add(ctx, "Large content", content, []string{"large"}, nil)
 	if err != nil {
 		t.Fatalf("Add large content: %v", err)
 	}
@@ -341,17 +415,17 @@ func TestStore_Chunking_LargeContentStoredAndRetrieved(t *testing.T) {
 	}
 }
 
-func TestStore_Chunking_SearchReturnsFullContent(t *testing.T) {
+func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
 	content := largeContent(chunkSizeWords + 50)
-	id, err := s.Add(ctx, content, "fact", nil)
+	id, err := s.Add(ctx, "Large content", content, nil, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0 word1 word2", 0)
+	results, err := s.Search(ctx, "word0 word1 word2", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -362,9 +436,6 @@ func TestStore_Chunking_SearchReturnsFullContent(t *testing.T) {
 	found := false
 	for _, r := range results {
 		if r.ID == id {
-			if r.Content != content {
-				t.Error("search result has wrong content for chunked memory")
-			}
 			found = true
 		}
 	}
@@ -379,12 +450,12 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 
 	// Content large enough to produce multiple chunks
 	content := largeContent(chunkSizeWords*2 + 10)
-	id, err := s.Add(ctx, content, "fact", nil)
+	id, err := s.Add(ctx, "Large content", content, nil, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0", 0)
+	results, err := s.Search(ctx, "word0", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -404,7 +475,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, largeContent(chunkSizeWords+50), "fact", nil)
+	id, err := s.Add(ctx, "Large content", largeContent(chunkSizeWords+50), nil, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -415,7 +486,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, err := s.Search(ctx, "word0", 0)
+	results, err := s.Search(ctx, "word0", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -431,13 +502,13 @@ func TestStore_Chunking_Update(t *testing.T) {
 	s := newTestStore(t)
 
 	// Store large content (chunked), then update with short content (single doc).
-	id, err := s.Add(ctx, largeContent(chunkSizeWords+50), "fact", []string{"tag1"})
+	id, err := s.Add(ctx, "Title", largeContent(chunkSizeWords+50), []string{"tag1"}, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
 	newContent := "short updated content"
-	if err := s.Update(ctx, id, newContent); err != nil {
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -448,8 +519,8 @@ func TestStore_Chunking_Update(t *testing.T) {
 	if mem.Content != newContent {
 		t.Errorf("expected updated content %q, got %q", newContent, mem.Content)
 	}
-	if mem.Type != "fact" {
-		t.Errorf("type not preserved after update: %q", mem.Type)
+	if mem.Title != "Title" {
+		t.Errorf("title not preserved after update: %q", mem.Title)
 	}
 	if len(mem.Tags) != 1 || mem.Tags[0] != "tag1" {
 		t.Errorf("tags not preserved after update: %v", mem.Tags)
@@ -488,13 +559,13 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	id, err := s.Add(ctx, "short content", "fact", []string{"tag1"})
+	id, err := s.Add(ctx, "Title", "short content", []string{"tag1"}, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
 	newContent := largeContent(chunkSizeWords + 50)
-	if err := s.Update(ctx, id, newContent); err != nil {
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -505,15 +576,15 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	if mem.Content != newContent {
 		t.Error("GetByID returned wrong content after short-to-long update")
 	}
-	if mem.Type != "fact" {
-		t.Errorf("type not preserved: %q", mem.Type)
+	if mem.Title != "Title" {
+		t.Errorf("title not preserved: %q", mem.Title)
 	}
 	if len(mem.Tags) != 1 || mem.Tags[0] != "tag1" {
 		t.Errorf("tags not preserved: %v", mem.Tags)
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, err := s.Search(ctx, "word0 word1", 0)
+	results, err := s.Search(ctx, "word0 word1", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -533,17 +604,36 @@ func TestStore_Search_NoLimit(t *testing.T) {
 	s := newTestStore(t)
 
 	for i := 0; i < 8; i++ {
-		if _, err := s.Add(ctx, fmt.Sprintf("memory item %d", i), "fact", nil); err != nil {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory item %d", i), fmt.Sprintf("memory item %d", i), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", 0)
+	results, err := s.Search(ctx, "memory item", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
 	if len(results) != 8 {
 		t.Errorf("expected all 8 results with no limit, got %d", len(results))
+	}
+}
+
+func TestStore_Search_QueryLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 8; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory item %d", i), fmt.Sprintf("memory item %d", i), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := s.Search(ctx, "memory item", "", 0, 3)
+	if err != nil {
+		t.Fatalf("Search with limit: %v", err)
+	}
+	if len(results) != 3 {
+		t.Errorf("expected 3 results with limit, got %d", len(results))
 	}
 }
 
@@ -558,18 +648,18 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func(i int) {
 			defer wg.Done()
-			if _, err := s.Add(ctx, fmt.Sprintf("concurrent memory %d", i), "fact", nil); err != nil {
+			if _, err := s.Add(ctx, fmt.Sprintf("Concurrent memory %d", i), fmt.Sprintf("concurrent memory %d", i), nil, nil); err != nil {
 				t.Errorf("concurrent Add %d failed: %v", i, err)
 			}
 		}(i)
 	}
 	wg.Wait()
 
-	mems, err := s.List(ctx, "", "", 0)
+	results, err := s.Search(ctx, "", "", 0, 0)
 	if err != nil {
-		t.Fatalf("List after concurrent adds: %v", err)
+		t.Fatalf("Search after concurrent adds: %v", err)
 	}
-	if len(mems) != goroutines {
-		t.Errorf("expected %d memories after concurrent adds, got %d", goroutines, len(mems))
+	if len(results) != goroutines {
+		t.Errorf("expected %d memories after concurrent adds, got %d", goroutines, len(results))
 	}
 }

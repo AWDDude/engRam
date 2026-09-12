@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,26 +29,49 @@ const (
 // Memory is the internal representation of a stored memory.
 type Memory struct {
 	ID        string   `json:"id"`
+	Title     string   `json:"title"`
 	Content   string   `json:"content"`
-	Type      string   `json:"type"`
 	Tags      []string `json:"tags"`
+	LinkedIDs []string `json:"linked_ids"`
 	CreatedAt string   `json:"created_at"`
 }
 
-// MemoryResult extends Memory with a cosine similarity score from vector search.
-type MemoryResult struct {
-	Memory
-	Score float32 `json:"score"`
+// SearchResult is the lightweight projection returned by Search, and reused
+// for the linked-memory summaries embedded in RetrieveResult.
+type SearchResult struct {
+	ID    string   `json:"id"`
+	Title string   `json:"title"`
+	Tags  []string `json:"tags"`
+}
+
+// RetrieveResult is the full-detail response for the retrieve tool: the
+// memory itself plus a one-level summary of each memory it links to.
+type RetrieveResult struct {
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Content   string         `json:"content"`
+	Tags      []string       `json:"tags"`
+	CreatedAt string         `json:"created_at"`
+	Linked    []SearchResult `json:"linked"`
+}
+
+// MemoryUpdate is a patch: nil fields are left untouched, non-nil fields are
+// applied as given (including an explicit empty slice, which clears tags or
+// linked_ids).
+type MemoryUpdate struct {
+	Title     *string
+	Content   *string
+	Tags      *[]string
+	LinkedIDs *[]string
 }
 
 // Store is the persistence interface for memories.
 type Store interface {
-	Add(ctx context.Context, content, memType string, tags []string) (string, error)
-	Search(ctx context.Context, query string, minScore float32) ([]MemoryResult, error)
-	List(ctx context.Context, typeFilter, tagFilter string, limit int) ([]Memory, error)
+	Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error)
+	Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]SearchResult, error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
-	Update(ctx context.Context, id, content string) error
+	Update(ctx context.Context, id string, patch MemoryUpdate) error
 }
 
 // chromemStore implements Store using chromem-go for vector search and a JSON
@@ -112,25 +136,13 @@ func (m *metaIndex) remove(id string) error {
 	return m.save()
 }
 
-func (m *metaIndex) list(typeFilter, tagFilter string, limit int) []Memory {
+func (m *metaIndex) list(tagFilter string, limit int) []Memory {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var results []Memory
 	for _, mem := range m.docs {
-		if typeFilter != "" && mem.Type != typeFilter {
+		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
 			continue
-		}
-		if tagFilter != "" {
-			matched := false
-			for _, tag := range mem.Tags {
-				if strings.Contains(strings.ToLower(tag), strings.ToLower(tagFilter)) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
 		}
 		results = append(results, mem)
 		if limit > 0 && len(results) >= limit {
@@ -138,6 +150,47 @@ func (m *metaIndex) list(typeFilter, tagFilter string, limit int) []Memory {
 		}
 	}
 	return results
+}
+
+// getRaw, setRaw, and removeRaw mutate docs without locking or persisting.
+// Callers must hold m.mu (getRaw needs at least a read lock; setRaw/removeRaw
+// need the write lock) and are responsible for calling save() themselves —
+// they exist so a batch operation that touches several records (see
+// syncLinks/cascadeUnlink below) can do so under one withLock call.
+
+func (m *metaIndex) getRaw(id string) (Memory, bool) {
+	mem, ok := m.docs[id]
+	return mem, ok
+}
+
+func (m *metaIndex) setRaw(mem Memory) {
+	m.docs[mem.ID] = mem
+}
+
+func (m *metaIndex) removeRaw(id string) {
+	delete(m.docs, id)
+}
+
+// withLock runs fn while holding the write lock, then persists once if fn
+// returns nil. This is the single choke point multi-record mutations go
+// through so each logical operation gets exactly one save() call.
+func (m *metaIndex) withLock(fn func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := fn(); err != nil {
+		return err
+	}
+	return m.save()
+}
+
+// hasMatchingTag reports whether any tag case-insensitively contains filter.
+func hasMatchingTag(tags []string, filter string) bool {
+	for _, tag := range tags {
+		if strings.Contains(strings.ToLower(tag), strings.ToLower(filter)) {
+			return true
+		}
+	}
+	return false
 }
 
 // chunkText splits text into overlapping word-based chunks. Returns a
@@ -221,67 +274,101 @@ func newChromemStoreWithEmb(cfg config.Config, embFn chromem.EmbeddingFunc) (Sto
 	return &chromemStore{col: col, meta: meta}, nil
 }
 
-func (s *chromemStore) Add(ctx context.Context, content, memType string, tags []string) (string, error) {
+func (s *chromemStore) Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error) {
 	id := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.addMemory(ctx, id, content, memType, tags, now); err != nil {
+	if err := s.addMemory(ctx, id, title, content, tags, nil, now); err != nil {
 		return "", err
+	}
+	if len(linkedIDs) > 0 {
+		if _, err := s.syncLinks(id, linkedIDs); err != nil {
+			// The memory itself was already persisted above; only the link
+			// side failed (e.g. an invalid linked ID). Return the ID so the
+			// caller isn't left with an orphaned record they can't address.
+			return id, fmt.Errorf("memory created but linking failed: %w", err)
+		}
 	}
 	return id, nil
 }
 
 // addMemory stores a memory to the vector collection (with chunking for large
-// content) and to the metaIndex. Used by Add, Update, and Reembed.
+// content) and to the metaIndex. Used by Add, Update, CSV import, and Reembed.
+//
+// The embedded text is "title\n\ncontent" rather than content alone, so
+// semantic search matches against the title as well — chromem-go embeds a
+// single Content field per document, so this is the simplest way to cover
+// both without a second index. Memory.Content in the metaIndex still stores
+// raw content only; the combined text is embedding input, never surfaced back.
 //
 // Content that fits within chunkSizeWords is stored as a single chromem document
 // with ID equal to the memory ID (backward-compatible with pre-chunking data).
 // Larger content is split into overlapping chunks stored as separate chromem
 // documents (IDs: "{id}:chunk:{n}") with a "parent_id" metadata field pointing
 // back to the memory ID; the full content is always preserved in the metaIndex.
-func (s *chromemStore) addMemory(ctx context.Context, id, content, memType string, tags []string, createdAt string) error {
+//
+// linkedIDs is written to the metaIndex verbatim with no validation or
+// bidirectional sync — callers that need the link invariant enforced (Add,
+// Update) go through syncLinks separately; CSV import and Reembed intentionally
+// bypass it and restore linkedIDs as-is (see import.go).
+func (s *chromemStore) addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error {
+	if err := s.writeVectorDocs(ctx, id, title, content, tags, createdAt); err != nil {
+		return err
+	}
+	return s.meta.set(Memory{
+		ID:        id,
+		Title:     title,
+		Content:   content,
+		Tags:      tags,
+		LinkedIDs: linkedIDs,
+		CreatedAt: createdAt,
+	})
+}
+
+// writeVectorDocs stores the embeddable text for a memory into the chromem
+// collection (chunking large content). It does not touch the metaIndex —
+// callers that need to persist the metadata record too should use addMemory,
+// or (as Update does) write it separately once they have a lock-consistent
+// view of fields they aren't overwriting.
+func (s *chromemStore) writeVectorDocs(ctx context.Context, id, title, content string, tags []string, createdAt string) error {
 	tagsJSON, _ := json.Marshal(tags)
 	baseMeta := map[string]string{
-		"type":       memType,
+		// Best-effort/write-only, same as today: nothing reads tags/created_at
+		// back out of chromem metadata, metaIndex is the source of truth.
 		"tags":       string(tagsJSON),
 		"created_at": createdAt,
 	}
 
-	chunks := chunkText(content)
+	embedText := title + "\n\n" + content
+	chunks := chunkText(embedText)
 	if len(chunks) == 1 {
 		if err := s.col.AddDocument(ctx, chromem.Document{
 			ID:       id,
-			Content:  content,
+			Content:  embedText,
 			Metadata: baseMeta,
 		}); err != nil {
 			return fmt.Errorf("adding to vector store: %w", err)
 		}
-	} else {
-		chunkMeta := make(map[string]string, len(baseMeta)+1)
-		for k, v := range baseMeta {
-			chunkMeta[k] = v
-		}
-		chunkMeta["parent_id"] = id
-
-		for i, chunk := range chunks {
-			if err := s.col.AddDocument(ctx, chromem.Document{
-				ID:       fmt.Sprintf("%s:chunk:%d", id, i),
-				Content:  chunk,
-				Metadata: chunkMeta,
-			}); err != nil {
-				// Clean up any chunks already written.
-				_ = s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
-				return fmt.Errorf("adding chunk %d to vector store: %w", i, err)
-			}
-		}
+		return nil
 	}
 
-	return s.meta.set(Memory{
-		ID:        id,
-		Content:   content,
-		Type:      memType,
-		Tags:      tags,
-		CreatedAt: createdAt,
-	})
+	chunkMeta := make(map[string]string, len(baseMeta)+1)
+	for k, v := range baseMeta {
+		chunkMeta[k] = v
+	}
+	chunkMeta["parent_id"] = id
+
+	for i, chunk := range chunks {
+		if err := s.col.AddDocument(ctx, chromem.Document{
+			ID:       fmt.Sprintf("%s:chunk:%d", id, i),
+			Content:  chunk,
+			Metadata: chunkMeta,
+		}); err != nil {
+			// Clean up any chunks already written.
+			_ = s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
+			return fmt.Errorf("adding chunk %d to vector store: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // deleteChromemDocs removes all chromem documents belonging to a memory. It
@@ -294,10 +381,19 @@ func (s *chromemStore) deleteChromemDocs(ctx context.Context, id string) error {
 	return s.col.Delete(ctx, map[string]string{"parent_id": id}, nil)
 }
 
-func (s *chromemStore) Search(ctx context.Context, query string, minScore float32) ([]MemoryResult, error) {
+// Search performs a semantic query, a tag filter, or both. query == ""
+// switches to a tag-only scan (mirroring the old List behavior) — callers
+// outside the MCP layer (export, reembed) may also pass both query and
+// tagFilter empty to mean "everything"; the "at least one required" rule is
+// enforced by the MCP handler, not here. limit <= 0 means unlimited.
+func (s *chromemStore) Search(ctx context.Context, query, tagFilter string, minScore float32, limit int) ([]SearchResult, error) {
+	if query == "" {
+		return toSearchResults(s.meta.list(tagFilter, limit)), nil
+	}
+
 	count := s.col.Count()
 	if count == 0 {
-		return []MemoryResult{}, nil
+		return []SearchResult{}, nil
 	}
 
 	results, err := s.col.Query(ctx, query, count, nil, nil)
@@ -325,24 +421,36 @@ func (s *chromemStore) Search(ctx context.Context, query string, minScore float3
 		if !ok {
 			continue // orphaned chunk, skip
 		}
+		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
+			continue
+		}
 		if e, exists := seen[memID]; !exists || r.Similarity > e.score {
 			seen[memID] = entry{mem: mem, score: r.Similarity}
 		}
 	}
 
-	out := make([]MemoryResult, 0, len(seen))
+	ordered := make([]entry, 0, len(seen))
 	for _, e := range seen {
-		out = append(out, MemoryResult{Memory: e.mem, Score: e.score})
+		ordered = append(ordered, e)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].score > ordered[j].score })
+	if limit > 0 && len(ordered) > limit {
+		ordered = ordered[:limit]
+	}
+
+	out := make([]SearchResult, 0, len(ordered))
+	for _, e := range ordered {
+		out = append(out, SearchResult{ID: e.mem.ID, Title: e.mem.Title, Tags: e.mem.Tags})
 	}
 	return out, nil
 }
 
-func (s *chromemStore) List(_ context.Context, typeFilter, tagFilter string, limit int) ([]Memory, error) {
-	results := s.meta.list(typeFilter, tagFilter, limit)
-	if results == nil {
-		return []Memory{}, nil
+func toSearchResults(mems []Memory) []SearchResult {
+	out := make([]SearchResult, 0, len(mems))
+	for _, mem := range mems {
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
 	}
-	return results, nil
+	return out
 }
 
 func (s *chromemStore) GetByID(_ context.Context, id string) (Memory, error) {
@@ -360,16 +468,198 @@ func (s *chromemStore) Delete(ctx context.Context, id string) error {
 	if err := s.deleteChromemDocs(ctx, id); err != nil {
 		return err
 	}
-	return s.meta.remove(id)
+	return s.cascadeUnlink(id)
 }
 
-func (s *chromemStore) Update(ctx context.Context, id, content string) error {
+func (s *chromemStore) Update(ctx context.Context, id string, patch MemoryUpdate) error {
+	// linked_ids, if patched, is handled first and entirely by syncLinks,
+	// which validates and persists atomically under one lock. Everything
+	// below must avoid re-persisting a stale snapshot of LinkedIDs on top of
+	// that (or of a concurrent link change from some other memory's
+	// Update) — each branch below re-reads the current record immediately
+	// before writing and only overwrites the fields this call actually
+	// patched.
+	if patch.LinkedIDs != nil {
+		if _, err := s.syncLinks(id, *patch.LinkedIDs); err != nil {
+			return err
+		}
+	}
+
+	needsReembed := patch.Title != nil || patch.Content != nil
+
+	if !needsReembed {
+		if patch.Tags == nil {
+			if patch.LinkedIDs == nil {
+				// Nothing was patched at all; still report a not-found id.
+				_, err := s.GetByID(ctx, id)
+				return err
+			}
+			return nil // syncLinks above already persisted the only change.
+		}
+		return s.meta.withLock(func() error {
+			current, ok := s.meta.getRaw(id)
+			if !ok {
+				return fmt.Errorf("memory %q not found", id)
+			}
+			current.Tags = *patch.Tags
+			s.meta.setRaw(current)
+			return nil
+		})
+	}
+
 	existing, err := s.GetByID(ctx, id)
 	if err != nil {
 		return err
 	}
+	title := existing.Title
+	if patch.Title != nil {
+		title = *patch.Title
+	}
+	content := existing.Content
+	if patch.Content != nil {
+		content = *patch.Content
+	}
+	tags := existing.Tags
+	if patch.Tags != nil {
+		tags = *patch.Tags
+	}
+
 	if err := s.deleteChromemDocs(ctx, id); err != nil {
 		return err
 	}
-	return s.addMemory(ctx, id, content, existing.Type, existing.Tags, existing.CreatedAt)
+	if err := s.writeVectorDocs(ctx, id, title, content, tags, existing.CreatedAt); err != nil {
+		return err
+	}
+	return s.meta.withLock(func() error {
+		current, ok := s.meta.getRaw(id)
+		if !ok {
+			return fmt.Errorf("memory %q not found", id)
+		}
+		current.Title = title
+		current.Content = content
+		if patch.Tags != nil {
+			current.Tags = tags
+		}
+		s.meta.setRaw(current)
+		return nil
+	})
+}
+
+// normalizeLinks dedupes ids and drops any reference to selfID, preserving
+// first-seen order.
+func normalizeLinks(selfID string, ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == selfID || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func toSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
+func removeString(ids []string, target string) []string {
+	out := ids[:0:0]
+	for _, id := range ids {
+		if id != target {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// syncLinks normalizes newLinks (self-reference and duplicates stripped),
+// validates every remaining ID exists, then atomically updates id's
+// LinkedIDs and every peer whose LinkedIDs must change to keep the
+// relationship bidirectional. Returns the normalized link set that was
+// applied. On validation failure nothing is mutated.
+//
+// Validation and mutation happen inside one withLock call so a concurrent
+// delete of a link target can't race a separate validate-then-mutate window —
+// this is the detail that makes the single metaIndex mutex sufficient for
+// correctness under concurrent link operations.
+func (s *chromemStore) syncLinks(id string, newLinks []string) ([]string, error) {
+	normalized := normalizeLinks(id, newLinks)
+
+	err := s.meta.withLock(func() error {
+		target, ok := s.meta.getRaw(id)
+		if !ok {
+			return fmt.Errorf("memory %q not found", id)
+		}
+		for _, linkID := range normalized {
+			if _, ok := s.meta.getRaw(linkID); !ok {
+				return fmt.Errorf("linked memory %q not found", linkID)
+			}
+		}
+
+		oldSet := toSet(target.LinkedIDs)
+		newSet := toSet(normalized)
+
+		for _, peerID := range normalized {
+			if oldSet[peerID] {
+				continue // already linked, peer side already has id
+			}
+			peer, _ := s.meta.getRaw(peerID)
+			if !toSet(peer.LinkedIDs)[id] {
+				peer.LinkedIDs = append(peer.LinkedIDs, id)
+				s.meta.setRaw(peer)
+			}
+		}
+		unlinkFromPeers(s.meta, id, target.LinkedIDs, newSet)
+
+		target.LinkedIDs = normalized
+		s.meta.setRaw(target)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
+// cascadeUnlink removes id from every other memory's LinkedIDs and deletes
+// id's own metaIndex entry, all under one lock/save so the cleanup is atomic
+// with the delete itself — no dangling references are ever left behind.
+func (s *chromemStore) cascadeUnlink(id string) error {
+	return s.meta.withLock(func() error {
+		target, ok := s.meta.getRaw(id)
+		if !ok {
+			// Already removed by a concurrent delete; nothing left to
+			// unlink. Mirrors the old metaIndex.remove's silent no-op on a
+			// missing key, so a racing double-delete stays idempotent.
+			return nil
+		}
+		unlinkFromPeers(s.meta, id, target.LinkedIDs, nil)
+		s.meta.removeRaw(id)
+		return nil
+	})
+}
+
+// unlinkFromPeers removes id from the LinkedIDs of each peer in peerIDs,
+// skipping any peer present in keep (nil keep skips none). Shared by
+// syncLinks (which keeps peers still present in the new link set) and
+// cascadeUnlink (which keeps none, since id is being deleted entirely).
+// Must be called while holding m's write lock (see withLock).
+func unlinkFromPeers(m *metaIndex, id string, peerIDs []string, keep map[string]bool) {
+	for _, peerID := range peerIDs {
+		if keep[peerID] {
+			continue
+		}
+		peer, ok := m.getRaw(peerID)
+		if !ok {
+			continue // peer already gone, nothing to clean up
+		}
+		peer.LinkedIDs = removeString(peer.LinkedIDs, id)
+		m.setRaw(peer)
+	}
 }
