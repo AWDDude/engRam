@@ -12,7 +12,7 @@ import (
 // so the tag is authoritative for anything published. The constant here is
 // what a local `go build` or `make build` reports, and should name the next
 // intended release.
-var version = "2.0.0"
+var version = "2.0.1"
 
 // commands lists every subcommand main dispatches on, so the usage text and
 // the dispatch table can be checked against each other.
