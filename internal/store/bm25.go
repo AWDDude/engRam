@@ -49,6 +49,11 @@ type bm25Index struct {
 	terms    map[string][]string
 	lengths  map[string]int
 	totalLen int
+	// docs holds every indexed id, including ones with zero terms (e.g. a
+	// title and content that tokenize to nothing). It exists only so score's
+	// corpus size for IDF counts every document, not just the ones that
+	// happen to have made it into terms/lengths.
+	docs map[string]struct{}
 }
 
 func newBM25Index() *bm25Index {
@@ -56,12 +61,14 @@ func newBM25Index() *bm25Index {
 		postings: make(map[string]map[string]int),
 		terms:    make(map[string][]string),
 		lengths:  make(map[string]int),
+		docs:     make(map[string]struct{}),
 	}
 }
 
 // set indexes, or re-indexes, one memory.
 func (ix *bm25Index) set(id, title, content string, tags []string) {
 	ix.remove(id)
+	ix.docs[id] = struct{}{}
 
 	counts := make(map[string]int)
 	for _, t := range tokenize(title) {
@@ -96,6 +103,7 @@ func (ix *bm25Index) set(id, title, content string, tags []string) {
 }
 
 func (ix *bm25Index) remove(id string) {
+	delete(ix.docs, id)
 	distinct, ok := ix.terms[id]
 	if !ok {
 		return
@@ -116,7 +124,7 @@ func (ix *bm25Index) remove(id string) {
 // zero — that omission is what keeps the lexical leg selective.
 func (ix *bm25Index) score(query string) map[string]float64 {
 	scores := make(map[string]float64)
-	n := len(ix.terms)
+	n := len(ix.docs)
 	if n == 0 {
 		return scores
 	}
@@ -158,15 +166,19 @@ func rankedIDs(scores map[string]float64) []string {
 // retrieval legs narrow their candidates this way before fusion, because RRF
 // sees only rank: without it, a barely-relevant hit at rank 3 contributes
 // nearly as much as a strong hit at rank 2.
+//
+// best starts at -Inf rather than 0: cosine similarity (the dense leg) can be
+// legitimately negative, and starting at 0 would silently skip the whole
+// corpus down to the true, negative best score.
 func keepWithinBand(scores map[string]float64, band float64) map[string]float64 {
-	var best float64
+	if len(scores) == 0 {
+		return scores
+	}
+	best := math.Inf(-1)
 	for _, score := range scores {
 		if score > best {
 			best = score
 		}
-	}
-	if best <= 0 {
-		return scores
 	}
 	for id, score := range scores {
 		if score < best*band {

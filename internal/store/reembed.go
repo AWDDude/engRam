@@ -18,6 +18,13 @@ import (
 // database file. Progress is written to w. Returns the number of memories
 // re-embedded.
 func Reembed(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
+	// Checked before the new model is downloaded so a no-op reembed (no
+	// existing db, or already on the target model) fails fast rather than
+	// paying for a model download it can't use.
+	if _, err := checkReembedable(cfg); err != nil {
+		return 0, err
+	}
+
 	embFn, cleanup, err := newEmbeddingFunc(ctx, cfg.Model.Path, cfg.Model.EmbeddingModel, cfg.Model.OnnxFilePath)
 	if err != nil {
 		return 0, fmt.Errorf("initializing new model: %w", err)
@@ -26,25 +33,33 @@ func Reembed(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
 	return reembedWithEmb(ctx, cfg, embFn, w)
 }
 
+// checkReembedable creates the db directory if needed and confirms cfg.DB.Path
+// holds an existing database on a model other than cfg.Model.EmbeddingModel,
+// returning that model's name.
+func checkReembedable(cfg config.Config) (string, error) {
+	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
+		return "", fmt.Errorf("creating db dir: %w", err)
+	}
+	meta, err := loadDBMeta(cfg.DB.Path)
+	if err != nil {
+		return "", err
+	}
+	if meta.ActiveModel == "" {
+		return "", fmt.Errorf("no existing database found at %s", cfg.DB.Path)
+	}
+	if meta.ActiveModel == cfg.Model.EmbeddingModel {
+		return "", fmt.Errorf("already using model %q, no re-embedding needed", cfg.Model.EmbeddingModel)
+	}
+	return meta.ActiveModel, nil
+}
+
 // reembedWithEmb performs the re-embedding with an injectable embedding function.
 // Exists to allow tests to run without a live model download.
 func reembedWithEmb(ctx context.Context, cfg config.Config, embFn EmbeddingFunc, w io.Writer) (int, error) {
-	if err := os.MkdirAll(cfg.DB.Path, 0700); err != nil {
-		return 0, fmt.Errorf("creating db dir: %w", err)
-	}
-
-	meta, err := loadDBMeta(cfg.DB.Path)
+	oldModel, err := checkReembedable(cfg)
 	if err != nil {
 		return 0, err
 	}
-	if meta.ActiveModel == "" {
-		return 0, fmt.Errorf("no existing database found at %s", cfg.DB.Path)
-	}
-	if meta.ActiveModel == cfg.Model.EmbeddingModel {
-		return 0, fmt.Errorf("already using model %q, no re-embedding needed", cfg.Model.EmbeddingModel)
-	}
-
-	oldModel := meta.ActiveModel
 	oldDBPath := modelDBPath(cfg.DB.Path, oldModel)
 
 	memories, err := readAllMemories(oldDBPath)

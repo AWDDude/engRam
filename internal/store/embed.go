@@ -68,6 +68,16 @@ func newEmbeddingFunc(ctx context.Context, modelDir, model, onnxFile string) (Em
 		return nil, nil, fmt.Errorf("downloading model %s: %w", model, err)
 	}
 
+	// modelDownloadDir and the OnnxFilename below both assume hugot's current
+	// flatten-to-basename layout; checking for the file here turns a layout
+	// change into a clear error instead of a confusing one surfacing later
+	// from inside the pipeline/onnxruntime.
+	onnxPath := filepath.Join(modelPath, filepath.Base(onnxFile))
+	if _, err := os.Stat(onnxPath); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("downloaded model %s but expected onnx file not found at %s: %w", model, onnxPath, err)
+	}
+
 	pipeline, err := hugot.NewPipeline(session, hugot.FeatureExtractionConfig{
 		ModelPath:    modelPath,
 		Name:         "embedding",

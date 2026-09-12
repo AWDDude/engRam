@@ -7,6 +7,17 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+// contentDescription documents the content argument's size cap, shared by
+// store (required) and update (optional) since both enforce the same limit
+// via App.validateContent.
+func contentDescription(lead string, maxContentChars int) string {
+	return fmt.Sprintf(
+		"%s (max %d characters). Longer material belongs in "+
+			"several linked memories rather than one: a memory past this size is "+
+			"split into chunks and its embedding gets vaguer, making it harder to "+
+			"retrieve, not easier.", lead, maxContentChars)
+}
+
 // searchLimitDescription documents the limit argument, naming the actual
 // configured default rather than an abstract "the default".
 //
@@ -41,11 +52,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 			),
 			mcp.WithString("content",
 				mcp.Required(),
-				mcp.Description(fmt.Sprintf(
-					"The content to store (max %d characters). Longer material belongs in "+
-						"several linked memories rather than one: a memory past this size is "+
-						"split into chunks and its embedding gets vaguer, making it harder to "+
-						"retrieve, not easier.", app.maxContentChars)),
+				mcp.Description(contentDescription("The content to store", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
 				mcp.Description("Optional tags for categorization"),
@@ -108,7 +115,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("New title (max 100 characters)"),
 			),
 			mcp.WithString("content",
-				mcp.Description("New content"),
+				mcp.Description(contentDescription("New content", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
 				mcp.Description("New tags (replaces the existing set)"),

@@ -130,7 +130,7 @@ func configFilePath() string {
 
 // Load reads config from ENGRAM_CONFIG_PATH, falling back to config.json in
 // the platform config directory. If the file does not exist it is created with
-// default values. ENGRAM_CONFIG_PATH skips auto-creation.
+// default values, whichever path it came from.
 //
 // Fields absent from an existing config file are filled in with their
 // defaults and reported on stderr, rather than being rejected. The file on

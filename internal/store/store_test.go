@@ -249,6 +249,43 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 	}
 }
 
+func TestStore_Search_TagOnly_OrdersByCreatedAtChronologically(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	idOld, err := s.Add(ctx, "Older", "older memory", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idNew, err := s.Add(ctx, "Newer", "newer memory", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force timestamps where a plain string sort ranks them backwards:
+	// RFC3339Nano drops trailing fractional-second zeros, so a whole-second
+	// stamp like "...10:00:00Z" sorts *after* "...10:00:00.3Z" as a string
+	// even though it is chronologically earlier.
+	bs := s.(*boltStore)
+	older := bs.docs[idOld]
+	older.CreatedAt = "2026-01-01T10:00:00Z"
+	bs.docs[idOld] = older
+	newer := bs.docs[idNew]
+	newer.CreatedAt = "2026-01-01T10:00:00.3Z"
+	bs.docs[idNew] = newer
+
+	results, err := s.Search(ctx, "", "", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].ID != idNew {
+		t.Errorf("expected chronologically newer memory %q first, got %q", idNew, results[0].ID)
+	}
+}
+
 func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

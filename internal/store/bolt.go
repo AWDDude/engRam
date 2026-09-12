@@ -411,7 +411,17 @@ func (s *boltStore) listLocked(tagFilter string, limit int) []Memory {
 	}
 	// Sort before truncating so a limited list is deterministic and returns
 	// the newest memories rather than an arbitrary subset of the map.
+	//
+	// CreatedAt is RFC3339Nano, which drops trailing fractional-second zeros —
+	// "10:00:00Z" vs "10:00:00.3Z" — so it must be parsed rather than compared
+	// as a string; a raw string compare ranks that pair, and similarly
+	// ".5Z" vs ".52Z", backwards.
 	sort.Slice(results, func(i, j int) bool {
+		ti, erri := time.Parse(time.RFC3339Nano, results[i].CreatedAt)
+		tj, errj := time.Parse(time.RFC3339Nano, results[j].CreatedAt)
+		if erri == nil && errj == nil && !ti.Equal(tj) {
+			return ti.After(tj)
+		}
 		if results[i].CreatedAt != results[j].CreatedAt {
 			return results[i].CreatedAt > results[j].CreatedAt
 		}
@@ -618,12 +628,26 @@ func encodeVectors(chunks [][]float32) ([]byte, error) {
 	return buf, nil
 }
 
+// maxVectorDim and maxVectorChunks bound decodeVectors' header fields before
+// they're multiplied together, so a corrupt or hand-edited blob can't overflow
+// the size computation into passing the length check below and then
+// allocating a multi-billion-element slice. Both are far above anything the
+// embedding pipeline or chunker actually produces (512-dim vectors, single- or
+// low-double-digit chunk counts for any realistic memory).
+const (
+	maxVectorDim    = 1 << 16
+	maxVectorChunks = 1 << 20
+)
+
 func decodeVectors(b []byte) ([][]float32, error) {
 	if len(b) < 8 {
 		return nil, fmt.Errorf("vector blob too short: %d bytes", len(b))
 	}
 	count := int(binary.LittleEndian.Uint32(b[0:4]))
 	dim := int(binary.LittleEndian.Uint32(b[4:8]))
+	if count > maxVectorChunks || dim > maxVectorDim {
+		return nil, fmt.Errorf("vector blob header out of range: count=%d dim=%d", count, dim)
+	}
 	if want := 8 + count*dim*4; len(b) != want {
 		return nil, fmt.Errorf("vector blob is %d bytes, expected %d", len(b), want)
 	}
