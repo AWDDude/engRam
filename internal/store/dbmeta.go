@@ -54,10 +54,11 @@ func saveDBMeta(dbPath string, m dbMeta) error {
 	return os.WriteFile(dbMetaPath(dbPath), data, 0600)
 }
 
-// modelCollectionPath returns the namespaced subdirectory for a given model
-// within dbPath, sanitizing the model name for use as a directory name.
-func modelCollectionPath(dbPath, model string) string {
+// modelDBPath returns the bolt file for a given model within dbPath,
+// sanitizing the model name for use as a filename. One file per model is what
+// lets reembed build the new model's database before deleting the old one.
+func modelDBPath(dbPath, model string) string {
 	safe := strings.ReplaceAll(model, "/", "_")
-	return filepath.Join(dbPath, safe)
+	return filepath.Join(dbPath, safe+".db")
 }
 

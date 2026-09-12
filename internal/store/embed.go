@@ -6,14 +6,23 @@ import (
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
-	chromem "github.com/philippgille/chromem-go"
+	"github.com/knights-analytics/hugot/util/fileutil"
 )
 
-// newEmbeddingFunc creates a chromem-compatible embedding function backed by
-// hugot's pure-Go (GoMLX simplego) session. The model is downloaded once to
-// modelDir on first run and reused on subsequent starts.
+// EmbeddingFunc turns text into a vector. Implementations are expected to
+// return unit-normalized vectors (the hugot pipeline below does).
+type EmbeddingFunc func(ctx context.Context, text string) ([]float32, error)
+
+// newEmbeddingFunc creates an embedding function backed by hugot's pure-Go
+// (GoMLX simplego) session. The model is downloaded once to modelDir on first
+// run and reused on subsequent starts.
 // The returned cleanup func must be called when the process exits.
-func newEmbeddingFunc(ctx context.Context, modelDir, model string) (chromem.EmbeddingFunc, func(), error) {
+func newEmbeddingFunc(ctx context.Context, modelDir, model string) (EmbeddingFunc, func(), error) {
+	// hugot resolves all file access through a FileSystem bound to the
+	// context; DownloadModel fails with "no filesystem bound to context"
+	// without this. A nil system selects hugot's default OS-backed one.
+	ctx = fileutil.WithFileSystem(ctx, nil)
+
 	session, err := hugot.NewGoSession(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating embedding session: %w", err)

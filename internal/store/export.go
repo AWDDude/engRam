@@ -17,7 +17,7 @@ var csvHeader = []string{"id", "title", "content", "tags", "linked_ids", "create
 // linked_ids, created_at; tags and linked_ids are joined with ";"). Returns
 // the number of memories exported.
 func Export(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
-	st, cleanup, err := NewChromemStore(cfg)
+	st, cleanup, err := NewBoltStore(cfg)
 	if err != nil {
 		return 0, err
 	}

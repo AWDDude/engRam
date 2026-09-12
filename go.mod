@@ -27,6 +27,7 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/yalue/onnxruntime_go v1.36.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/image v0.46.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect

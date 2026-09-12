@@ -3,3 +3,7 @@
 /models/
 /config.json
 .DS_Store
+
+# local backup / migration artifacts
+/engram-db-backup-*.tar.gz
+/engram-migration-*.csv

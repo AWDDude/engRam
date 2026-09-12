@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	chromem "github.com/philippgille/chromem-go"
-
 	"github.com/AWDDude/engRam/internal/config"
 )
 
@@ -36,16 +34,17 @@ func testEmbedFunc(_ context.Context, text string) ([]float32, error) {
 
 func newTestStore(t *testing.T) Store {
 	t.Helper()
-	s, err := newChromemStoreWithEmb(
+	s, err := newBoltStoreWithEmb(
 		config.Config{
 			DB:    config.DBConfig{Path: t.TempDir()},
 			Model: config.ModelConfig{EmbeddingModel: "test-model"},
 		},
-		chromem.EmbeddingFunc(testEmbedFunc),
+		EmbeddingFunc(testEmbedFunc),
 	)
 	if err != nil {
 		t.Fatalf("creating test store: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

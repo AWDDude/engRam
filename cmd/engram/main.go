@@ -32,7 +32,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, cleanup, err := store.NewChromemStore(cfg)
+	st, cleanup, err := store.NewBoltStore(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram: %v\n", err)
 		os.Exit(1)

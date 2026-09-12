@@ -16,7 +16,7 @@ import (
 // them to the store, preserving IDs, tags, and creation timestamps. A blank
 // ID is assigned a new one. Returns the number of memories imported.
 func Import(ctx context.Context, cfg config.Config, r io.Reader) (int, error) {
-	st, cleanup, err := NewChromemStore(cfg)
+	st, cleanup, err := NewBoltStore(cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -25,9 +25,9 @@ func Import(ctx context.Context, cfg config.Config, r io.Reader) (int, error) {
 }
 
 func importStore(ctx context.Context, st Store, r io.Reader) (int, error) {
-	cs, ok := st.(*chromemStore)
+	cs, ok := st.(rawAdder)
 	if !ok {
-		return 0, fmt.Errorf("import requires a chromem-backed store")
+		return 0, fmt.Errorf("import requires a store supporting raw adds")
 	}
 
 	cr := csv.NewReader(r)
