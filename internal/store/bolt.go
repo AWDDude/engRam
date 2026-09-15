@@ -257,11 +257,11 @@ func (s *boltStore) commit(changes []change) error {
 func (s *boltStore) Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error) {
 	id := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.addMemory(ctx, id, title, content, tags, nil, now); err != nil {
+	if err := s.addMemory(ctx, id, title, content, normalizeTags(tags), nil, now); err != nil {
 		return "", err
 	}
 	if len(linkedIDs) > 0 {
-		if _, err := s.syncLinks(id, linkedIDs); err != nil {
+		if _, err := s.syncLinks(id, MemoryUpdate{LinkedIDs: &linkedIDs}); err != nil {
 			// The memory itself was already persisted above; only the link
 			// side failed (e.g. an invalid linked ID). Return the ID so the
 			// caller isn't left with an orphaned record they can't address.
@@ -325,19 +325,21 @@ func (s *boltStore) embedChunks(ctx context.Context, title, content string) ([][
 //
 // query == "" switches to a tag-only scan — callers outside the MCP layer
 // (export, reembed) may also pass both query and tagFilter empty to mean
-// "everything"; the "at least one required" rule is enforced by the MCP
-// handler, not here. limit <= 0 means unlimited.
-func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error) {
+// "everything". tagFilter matches by exact, case-insensitive equality; a
+// memory must carry every listed tag (AND semantics). limit <= 0 means
+// unlimited; offset <= 0 means from the start.
+func (s *boltStore) Search(ctx context.Context, query string, tagFilter []string, limit, offset int) ([]SearchResult, int, error) {
 	if query == "" {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return toSearchResults(s.listLocked(tagFilter, limit)), nil
+		page, total := s.listLocked(tagFilter, limit, offset)
+		return toSearchResults(page), total, nil
 	}
 
 	// Embedding is slow and needs no lock; do it before taking one.
 	qv, err := s.embed(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("embedding query: %w", err)
+		return nil, 0, fmt.Errorf("embedding query: %w", err)
 	}
 
 	s.mu.RLock()
@@ -349,6 +351,14 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit i
 	)
 
 	ranked := applyRelativeCutoff(rankedIDs(fused), fused, rrfRelativeCutoff)
+	total := len(ranked)
+	if offset > 0 {
+		if offset >= len(ranked) {
+			ranked = nil
+		} else {
+			ranked = ranked[offset:]
+		}
+	}
 	if limit > 0 && len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
@@ -356,9 +366,9 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit i
 	out := make([]SearchResult, 0, len(ranked))
 	for _, id := range ranked {
 		mem := s.docs[id]
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // denseScoresLocked scores every memory by its best-matching chunk, then keeps
@@ -366,14 +376,14 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit i
 // cosine similarity ranks every document in the corpus, so without this the
 // dense leg would contribute a long tail of noise to the fusion.
 // Callers must hold s.mu.
-func (s *boltStore) denseScoresLocked(qv []float32, tagFilter string) map[string]float64 {
+func (s *boltStore) denseScoresLocked(qv []float32, tagFilter []string) map[string]float64 {
 	scores := make(map[string]float64, len(s.vecs))
 	for id, chunks := range s.vecs {
 		mem, ok := s.docs[id]
 		if !ok {
 			continue // orphaned vectors, skip
 		}
-		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
+		if !hasAllTags(mem.Tags, tagFilter) {
 			continue
 		}
 		var top float32 = -1
@@ -389,22 +399,24 @@ func (s *boltStore) denseScoresLocked(qv []float32, tagFilter string) map[string
 
 // sparseScoresLocked runs the BM25 query and applies the tag filter.
 // Callers must hold s.mu.
-func (s *boltStore) sparseScoresLocked(query, tagFilter string) map[string]float64 {
+func (s *boltStore) sparseScoresLocked(query string, tagFilter []string) map[string]float64 {
 	scores := s.bm25.score(query)
 	for id := range scores {
 		mem, ok := s.docs[id]
-		if !ok || (tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter)) {
+		if !ok || !hasAllTags(mem.Tags, tagFilter) {
 			delete(scores, id)
 		}
 	}
 	return keepWithinBand(scores, sparseCandidateBand)
 }
 
-// listLocked returns matching memories newest-first. Callers must hold s.mu.
-func (s *boltStore) listLocked(tagFilter string, limit int) []Memory {
+// listLocked returns a page of matching memories newest-first, plus total,
+// the count of matches before offset/limit were applied. Callers must hold
+// s.mu.
+func (s *boltStore) listLocked(tagFilter []string, limit, offset int) (page []Memory, total int) {
 	results := make([]Memory, 0, len(s.docs))
 	for _, mem := range s.docs {
-		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
+		if !hasAllTags(mem.Tags, tagFilter) {
 			continue
 		}
 		results = append(results, mem)
@@ -427,10 +439,37 @@ func (s *boltStore) listLocked(tagFilter string, limit int) []Memory {
 		}
 		return results[i].ID < results[j].ID
 	})
+	total = len(results)
+	if offset > 0 {
+		if offset >= len(results) {
+			results = nil
+		} else {
+			results = results[offset:]
+		}
+	}
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
-	return results
+	return results, total
+}
+
+// Tags returns every distinct tag currently used across stored memories,
+// sorted, to aid tag_filter discoverability.
+func (s *boltStore) Tags(_ context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := make(map[string]bool)
+	for _, mem := range s.docs {
+		for _, tag := range normalizeTags(mem.Tags) {
+			seen[tag] = true
+		}
+	}
+	tags := make([]string, 0, len(seen))
+	for tag := range seen {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags, nil
 }
 
 func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {
@@ -440,6 +479,7 @@ func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {
 	if !ok {
 		return Memory{}, fmt.Errorf("memory %q not found", id)
 	}
+	mem.Tags = normalizeTags(mem.Tags)
 	return mem, nil
 }
 
@@ -460,58 +500,60 @@ func (s *boltStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) error {
-	// linked_ids, if patched, is handled first and entirely by syncLinks,
-	// which validates and persists atomically. Everything below re-reads the
-	// current record under the lock before writing, so it can't clobber that
-	// (or a concurrent link change from another memory's Update) with a stale
-	// snapshot — each branch overwrites only the fields it actually patched.
-	if patch.LinkedIDs != nil {
-		if _, err := s.syncLinks(id, *patch.LinkedIDs); err != nil {
+	if patch.Tags != nil {
+		normalized := normalizeTags(*patch.Tags)
+		patch.Tags = &normalized
+	}
+	patch.AddTags = normalizeTags(patch.AddTags)
+	patch.RemoveTags = normalizeTags(patch.RemoveTags)
+	tagsChanged := patch.Tags != nil || len(patch.AddTags) > 0 || len(patch.RemoveTags) > 0
+	linksChanged := patch.LinkedIDs != nil || len(patch.AddLinkedIDs) > 0 || len(patch.RemoveLinkedIDs) > 0
+	needsReembed := patch.Title != nil || patch.Content != nil
+
+	var (
+		title, content string
+		vectors        [][]float32
+	)
+	if needsReembed {
+		existing, err := s.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		title, content = existing.Title, existing.Content
+		if patch.Title != nil {
+			title = *patch.Title
+		}
+		if patch.Content != nil {
+			content = *patch.Content
+		}
+		// Embedding is slow and needs no lock, but it can also fail, so it
+		// runs before anything is persisted: a backend outage then leaves the
+		// record (and its links) exactly as it was, rather than committing
+		// half the patch.
+		vectors, err = s.embedChunks(ctx, title, content)
+		if err != nil {
 			return err
 		}
 	}
 
-	needsReembed := patch.Title != nil || patch.Content != nil
+	// Links, if patched, are handled entirely by syncLinks, which resolves
+	// LinkedIDs/AddLinkedIDs/RemoveLinkedIDs against the current set and
+	// persists atomically. Everything below re-reads the current record under
+	// the lock before writing, so it can't clobber that (or a concurrent link
+	// change from another memory's Update) with a stale snapshot — each branch
+	// overwrites only the fields it actually patched.
+	if linksChanged {
+		if _, err := s.syncLinks(id, patch); err != nil {
+			return err
+		}
+	}
 
-	if !needsReembed {
-		if patch.Tags == nil {
-			if patch.LinkedIDs == nil {
-				// Nothing was patched at all; still report a not-found id.
-				_, err := s.GetByID(ctx, id)
-				return err
-			}
+	if !needsReembed && !tagsChanged {
+		if linksChanged {
 			return nil // syncLinks above already persisted the only change.
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		current, ok := s.docs[id]
-		if !ok {
-			return fmt.Errorf("memory %q not found", id)
-		}
-		current.Tags = *patch.Tags
-		// vectors omitted: a tags-only change must not re-embed.
-		return s.commit([]change{{mem: current}})
-	}
-
-	existing, err := s.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	title := existing.Title
-	if patch.Title != nil {
-		title = *patch.Title
-	}
-	content := existing.Content
-	if patch.Content != nil {
-		content = *patch.Content
-	}
-	tags := existing.Tags
-	if patch.Tags != nil {
-		tags = *patch.Tags
-	}
-
-	vectors, err := s.embedChunks(ctx, title, content)
-	if err != nil {
+		// Nothing was patched at all; still report a not-found id.
+		_, err := s.GetByID(ctx, id)
 		return err
 	}
 
@@ -521,26 +563,36 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	if !ok {
 		return fmt.Errorf("memory %q not found", id)
 	}
+	if tagsChanged {
+		// Resolved against the record as it is now, not the snapshot read
+		// before embedding: an add/remove patch must not silently drop a tag
+		// another Update committed while this one was embedding.
+		current.Tags = applyTagPatch(current.Tags, patch)
+	}
+	if !needsReembed {
+		// vectors omitted: a tags-only change must not re-embed.
+		return s.commit([]change{{mem: current}})
+	}
 	current.Title = title
 	current.Content = content
-	if patch.Tags != nil {
-		current.Tags = tags
-	}
 	return s.commit([]change{{mem: current, vectors: vectors}})
 }
 
-// syncLinks normalizes newLinks (self-reference and duplicates stripped),
-// validates every remaining ID exists, then updates id's LinkedIDs and every
-// peer whose LinkedIDs must change to keep the relationship bidirectional.
-// Returns the normalized link set that was applied.
+// syncLinks resolves patch's link fields (LinkedIDs replaces the set
+// outright; AddLinkedIDs/RemoveLinkedIDs adjust it incrementally, in the same
+// fixed order as applyTagPatch) against id's current LinkedIDs, normalizes
+// the result (self-reference and duplicates stripped), validates every
+// remaining ID exists, then updates id's LinkedIDs and every peer whose
+// LinkedIDs must change to keep the relationship bidirectional. Returns the
+// normalized link set that was applied.
 //
-// Validation and mutation happen under one lock and land in one transaction,
-// so a concurrent delete of a link target can't race a separate
-// validate-then-mutate window, and a mid-write failure can't leave one side of
-// a link updated without the other. On validation failure nothing is mutated.
-func (s *boltStore) syncLinks(id string, newLinks []string) ([]string, error) {
-	normalized := normalizeLinks(id, newLinks)
-
+// The base set is read, resolved, validated, and mutated all under one lock
+// and landed in one transaction, so a concurrent change to id's own link set
+// can't race the read AddLinkedIDs/RemoveLinkedIDs patch against, a
+// concurrent delete of a link target can't race validation, and a mid-write
+// failure can't leave one side of a link updated without the other. On
+// validation failure nothing is mutated.
+func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -548,6 +600,9 @@ func (s *boltStore) syncLinks(id string, newLinks []string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("memory %q not found", id)
 	}
+
+	normalized := normalizeLinks(id, applyLinkPatch(target.LinkedIDs, patch))
+
 	for _, linkID := range normalized {
 		if _, ok := s.docs[linkID]; !ok {
 			return nil, fmt.Errorf("linked memory %q not found", linkID)

@@ -50,20 +50,49 @@ type RetrieveResult struct {
 // MemoryUpdate is a patch: nil fields are left untouched, non-nil fields are
 // applied as given (including an explicit empty slice, which clears tags or
 // linked_ids).
+//
+// Tags is a full replacement; AddTags/RemoveTags are an incremental
+// alternative that leaves tags not mentioned untouched. Callers should treat
+// them as mutually exclusive with Tags (the MCP handler rejects combining
+// them); if both somehow arrive together, Tags is applied first and
+// AddTags/RemoveTags apply on top of it. AddTags and RemoveTags are plain
+// slices, not pointers: nil and empty both mean "no change," since there's
+// no meaningful "clear via add/remove" the way an explicit empty Tags means
+// "clear all tags." A tag in both AddTags and RemoveTags ends up removed.
+//
+// LinkedIDs/AddLinkedIDs/RemoveLinkedIDs follow the identical pattern for
+// links, resolved by syncLinks under its own lock so the base set they patch
+// against can't go stale between being read and being applied.
 type MemoryUpdate struct {
-	Title     *string
-	Content   *string
-	Tags      *[]string
-	LinkedIDs *[]string
+	Title           *string
+	Content         *string
+	Tags            *[]string
+	AddTags         []string
+	RemoveTags      []string
+	LinkedIDs       *[]string
+	AddLinkedIDs    []string
+	RemoveLinkedIDs []string
 }
 
 // Store is the persistence interface for memories.
 type Store interface {
 	Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error)
-	Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error)
+	// Search returns a page of matches plus total, the number of candidates
+	// that matched before offset/limit were applied — for a ranked query this
+	// is the count after the relevance cutoff, for query == "" (a tag-only or
+	// unfiltered listing) it's the count of matching memories in the store.
+	// Callers use total to tell whether they've paged through everything.
+	//
+	// tagFilter matches by exact, case-insensitive equality; a memory must
+	// carry every tag listed (AND semantics) to match. An empty tagFilter
+	// matches everything.
+	Search(ctx context.Context, query string, tagFilter []string, limit, offset int) (results []SearchResult, total int, err error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id string, patch MemoryUpdate) error
+	// Tags returns every distinct tag currently used across stored memories,
+	// sorted, to aid tag_filter discoverability.
+	Tags(ctx context.Context) ([]string, error)
 }
 
 // rawAdder is the unvalidated write path: it stores a memory with an explicit
@@ -74,10 +103,23 @@ type rawAdder interface {
 	addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error
 }
 
-// hasMatchingTag reports whether any tag case-insensitively contains filter.
-func hasMatchingTag(tags []string, filter string) bool {
+// hasAllTags reports whether tags contains an exact, case-insensitive match
+// for every tag in filters. An empty filters matches everything. It runs once
+// per memory on every filtered scan, so it compares in place rather than
+// building a lookup set: both sides are a handful of tags, and allocating a
+// map per memory cost more than the linear scan it saved.
+func hasAllTags(tags []string, filters []string) bool {
+	for _, f := range filters {
+		if !containsFold(tags, f) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsFold(tags []string, want string) bool {
 	for _, tag := range tags {
-		if strings.Contains(strings.ToLower(tag), strings.ToLower(filter)) {
+		if strings.EqualFold(tag, want) {
 			return true
 		}
 	}
@@ -109,7 +151,99 @@ func chunkText(text string) []string {
 func toSearchResults(mems []Memory) []SearchResult {
 	out := make([]SearchResult, 0, len(mems))
 	for _, mem := range mems {
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
+	}
+	return out
+}
+
+// normalizeTags lowercases every tag so two memories can't drift into
+// differently-cased "duplicate" tags, and tag_filter's exact match needs no
+// per-comparison case folding. Applied on write (Add, Update) and again on
+// every read path (GetByID, Search, Tags) so tags written before this rule
+// existed still come back lowercased without a data migration.
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return tags
+	}
+	out := make([]string, len(tags))
+	for i, t := range tags {
+		out[i] = strings.ToLower(t)
+	}
+	return out
+}
+
+// applyTagPatch resolves a MemoryUpdate's tag fields against currentTags, in
+// a fixed order: patch.Tags (if given) replaces the set outright, then
+// patch.AddTags unions in, then patch.RemoveTags subtracts — so a tag listed
+// in both AddTags and RemoveTags ends up removed. patch.Tags/AddTags/
+// RemoveTags are assumed already normalized by the caller (Update does this
+// once at entry); currentTags is normalized here since it may still carry
+// legacy mixed-case tags read straight from storage rather than through a
+// path that normalizes on read.
+func applyTagPatch(currentTags []string, patch MemoryUpdate) []string {
+	tags := normalizeTags(currentTags)
+	if patch.Tags != nil {
+		tags = *patch.Tags
+	}
+	if len(patch.AddTags) > 0 {
+		merged := make([]string, 0, len(tags)+len(patch.AddTags))
+		merged = append(merged, tags...)
+		merged = append(merged, patch.AddTags...)
+		tags = dedupeStrings(merged)
+	}
+	if len(patch.RemoveTags) > 0 {
+		remove := toSet(patch.RemoveTags)
+		out := tags[:0:0]
+		for _, tag := range tags {
+			if !remove[tag] {
+				out = append(out, tag)
+			}
+		}
+		tags = out
+	}
+	return tags
+}
+
+// applyLinkPatch resolves a MemoryUpdate's link fields against
+// currentLinkedIDs, in the same fixed order as applyTagPatch: patch.LinkedIDs
+// (if given) replaces the set outright, then AddLinkedIDs unions in, then
+// RemoveLinkedIDs subtracts — so an id listed in both AddLinkedIDs and
+// RemoveLinkedIDs ends up removed. The result may still contain duplicates or
+// a self-reference; syncLinks runs it through normalizeLinks before use.
+func applyLinkPatch(currentLinkedIDs []string, patch MemoryUpdate) []string {
+	ids := currentLinkedIDs
+	if patch.LinkedIDs != nil {
+		ids = *patch.LinkedIDs
+	}
+	if len(patch.AddLinkedIDs) > 0 {
+		merged := make([]string, 0, len(ids)+len(patch.AddLinkedIDs))
+		merged = append(merged, ids...)
+		merged = append(merged, patch.AddLinkedIDs...)
+		ids = merged
+	}
+	if len(patch.RemoveLinkedIDs) > 0 {
+		remove := toSet(patch.RemoveLinkedIDs)
+		out := ids[:0:0]
+		for _, i := range ids {
+			if !remove[i] {
+				out = append(out, i)
+			}
+		}
+		ids = out
+	}
+	return ids
+}
+
+// dedupeStrings removes duplicate values, preserving first-seen order.
+func dedupeStrings(items []string) []string {
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
 	}
 	return out
 }

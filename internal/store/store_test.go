@@ -34,12 +34,19 @@ func testEmbedFunc(_ context.Context, text string) ([]float32, error) {
 
 func newTestStore(t *testing.T) Store {
 	t.Helper()
+	return newTestStoreWithEmb(t, testEmbedFunc)
+}
+
+// newTestStoreWithEmb is newTestStore with a caller-supplied embedding
+// function, for tests that need embedding to block or fail on demand.
+func newTestStoreWithEmb(t *testing.T, embed EmbeddingFunc) Store {
+	t.Helper()
 	s, err := newBoltStoreWithEmb(
 		config.Config{
 			DB:    config.DBConfig{Path: t.TempDir()},
 			Model: config.ModelConfig{EmbeddingModel: "test-model"},
 		},
-		EmbeddingFunc(testEmbedFunc),
+		embed,
 	)
 	if err != nil {
 		t.Fatalf("creating test store: %v", err)
@@ -133,7 +140,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", "", 0)
+	results, _, err := s.Search(ctx, "anything", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -153,7 +160,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", "", 0)
+	results, _, err := s.Search(ctx, "terminal preferences", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -175,7 +182,7 @@ func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "some content", "", 0)
+	results, _, err := s.Search(ctx, "some content", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -201,12 +208,380 @@ func TestStore_Search_TagOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "KUBE", 0)
+	results, _, err := s.Search(ctx, "", []string{"KUBERNETES"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(results) != 1 {
-		t.Errorf("expected 1 result for tag filter, got %d", len(results))
+		t.Errorf("expected 1 result for a case-insensitive exact tag filter, got %d", len(results))
+	}
+}
+
+func TestStore_Search_TagFilter_ExactNotSubstring(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Entity note", "uses entity tagging", []string{"entity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Identity note", "uses workload identity", []string{"workload-identity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"entity"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Entity note" {
+		t.Errorf("expected tag_filter %q to match only the exact tag, not %q as a substring, got %+v", "entity", "workload-identity", results)
+	}
+}
+
+func TestStore_Search_TagFilter_MultipleTagsIsAND(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "has both", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "One tag", "has one", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"kubernetes", "infra"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected multiple tag_filter values to AND together, got %+v", results)
+	}
+}
+
+func TestStore_Search_Query_TagFilter_ExactNotSubstring(t *testing.T) {
+	// A ranked query filters in denseScoresLocked and sparseScoresLocked, not
+	// in listLocked, so exactness has to be proven on that path separately.
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Entity note", "cluster admin notes", []string{"entity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Identity note", "cluster admin notes", []string{"workload-identity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "cluster admin notes", []string{"entity"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 1 || len(results) != 1 || results[0].Title != "Entity note" {
+		t.Errorf("expected a ranked query with tag_filter %q to match only the exact tag, not %q as a substring, got total %d and %+v", "entity", "workload-identity", total, results)
+	}
+}
+
+func TestStore_Search_Query_TagFilter_MultipleTagsIsAND(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "cluster admin notes", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "One tag", "cluster admin notes", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "cluster admin notes", []string{"kubernetes", "infra"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 1 || len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected multiple tag_filter values to AND together on the ranked path, got total %d and %+v", total, results)
+	}
+}
+
+func TestStore_Search_TagFilter_SubstringNeitherDirectionMatches(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Fact", "a plain fact", []string{"fact"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Artifact", "a build artifact", []string{"artifact"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Factoid", "a factoid", []string{"factoid"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Refactor", "a refactor", []string{"refactor"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"fact"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Fact" {
+		t.Errorf("expected tag_filter %q to match only the tag %q, not the tags containing it, got %+v", "fact", "fact", results)
+	}
+
+	results, _, err = s.Search(ctx, "", []string{"artifact"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Artifact" {
+		t.Errorf("expected tag_filter %q not to match the shorter tag %q it contains, got %+v", "artifact", "fact", results)
+	}
+}
+
+func TestStore_Search_TagFilter_EmptySliceMatchesEverything(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	alphaID, err := s.Add(ctx, "Alpha note", "alpha content", []string{"alpha"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Beta note", "beta content", []string{"beta"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "", []string{}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 || total != 2 {
+		t.Errorf("expected an empty tag_filter to match everything, got %d results, total %d", len(results), total)
+	}
+
+	results, _, err = s.Search(ctx, "alpha content", []string{}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == alphaID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an empty tag_filter to leave a ranked query unfiltered, got %+v", results)
+	}
+}
+
+func TestStore_Search_TagFilter_UnknownTagMatchesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Kubernetes fact", "cluster admin notes", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "", []string{"no-such-tag"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 0 || total != 0 {
+		t.Errorf("expected a tag_filter no memory carries to match nothing, got %d results, total %d", len(results), total)
+	}
+
+	results, total, err = s.Search(ctx, "cluster admin notes", []string{"no-such-tag"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 0 || total != 0 {
+		t.Errorf("expected a ranked query with an unknown tag_filter to match nothing, got %d results, total %d", len(results), total)
+	}
+}
+
+func TestStore_Search_TagFilter_CaseInsensitiveAcrossMultipleValues(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "has both", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"Kubernetes", "INFRA"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected every tag_filter value to match case-insensitively, got %+v", results)
+	}
+}
+
+func TestStore_Tags_ReturnsSortedDistinctTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "A", "a", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "B", "b", []string{"golang", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	want := []string{"golang", "infra", "kubernetes"}
+	if len(tags) != len(want) {
+		t.Fatalf("expected %v, got %v", want, tags)
+	}
+	for i := range want {
+		if tags[i] != want[i] {
+			t.Errorf("expected %v, got %v", want, tags)
+			break
+		}
+	}
+}
+
+func TestStore_Tags_EmptyStore(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected no tags for an empty store, got %v", tags)
+	}
+}
+
+func TestStore_Add_NormalizesTagsToLowercase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Mixed case tags", "content", []string{"Kubernetes", "INFRA"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kubernetes", "infra"}
+	if len(mem.Tags) != len(want) {
+		t.Fatalf("expected tags normalized to %v, got %v", want, mem.Tags)
+	}
+	for i := range want {
+		if mem.Tags[i] != want[i] {
+			t.Errorf("expected tags normalized to %v, got %v", want, mem.Tags)
+			break
+		}
+	}
+}
+
+func TestStore_Update_NormalizesTagsToLowercase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTags := []string{"Golang", "Systems"}
+	if err := s.Update(ctx, id, MemoryUpdate{Tags: &newTags}); err != nil {
+		t.Fatal(err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"golang", "systems"}
+	if len(mem.Tags) != len(want) {
+		t.Fatalf("expected tags normalized to %v, got %v", want, mem.Tags)
+	}
+	for i := range want {
+		if mem.Tags[i] != want[i] {
+			t.Errorf("expected tags normalized to %v, got %v", want, mem.Tags)
+			break
+		}
+	}
+}
+
+func TestStore_Tags_CaseVariantsCollapseToOneEntry(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "A", "a", []string{"Kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "B", "b", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != "kubernetes" {
+		t.Errorf("expected mixed-case writes to normalize into one entry, got %v", tags)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"KUBERNETES"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected the normalized tag to filter to both memories, got %d results", len(results))
+	}
+}
+
+// TestStore_ReadPaths_NormalizeLegacyMixedCaseTags proves the self-healing
+// half of the lowercase rule: data written before normalization existed (or
+// restored verbatim by CSV import / reembed) still comes back lowercased on
+// every read path, without a data migration. It bypasses Add/Update to plant
+// mixed-case tags directly, the way TestStore_Search_TagOnly_OrdersByCreatedAtChronologically
+// bypasses them to control CreatedAt.
+func TestStore_ReadPaths_NormalizeLegacyMixedCaseTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Legacy", "cluster admin notes", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := s.(*boltStore)
+	mem := bs.docs[id]
+	mem.Tags = []string{"Kubernetes"}
+	bs.docs[id] = mem
+
+	got, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "kubernetes" {
+		t.Errorf("expected GetByID to normalize a legacy mixed-case tag, got %v", got.Tags)
+	}
+
+	tagOnly, _, err := s.Search(ctx, "", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tagOnly) != 1 || len(tagOnly[0].Tags) != 1 || tagOnly[0].Tags[0] != "kubernetes" {
+		t.Errorf("expected the tag-only Search path to normalize a legacy mixed-case tag, got %+v", tagOnly)
+	}
+
+	ranked, _, err := s.Search(ctx, "cluster admin notes", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranked) != 1 || len(ranked[0].Tags) != 1 || ranked[0].Tags[0] != "kubernetes" {
+		t.Errorf("expected the ranked-query Search path to normalize a legacy mixed-case tag, got %+v", ranked)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0] != "kubernetes" {
+		t.Errorf("expected list_tags to normalize a legacy mixed-case tag, got %v", tags)
 	}
 }
 
@@ -221,7 +596,7 @@ func TestStore_Search_TagOnly_All(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -240,12 +615,174 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "", "", 3)
+	results, _, err := s.Search(ctx, "", nil, 3, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(results) != 3 {
 		t.Errorf("expected 3 results with limit, got %d", len(results))
+	}
+}
+
+func TestStore_Search_TagOnly_OffsetAndTotal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory %d", i), "memory", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", nil, 2, 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected total 5, got %d", total)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results after skipping 3 of 5, got %d", len(results))
+	}
+
+	results, total, err = s.Search(ctx, "", nil, 0, 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected total 5 even when offset exceeds it, got %d", total)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results when offset exceeds the match count, got %d", len(results))
+	}
+}
+
+func TestStore_Search_Query_OffsetAndTotal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Widget %d", i), "widget content", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, total, err := s.Search(ctx, "widget", nil, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != len(all) {
+		t.Errorf("expected total to equal the unpaged result count %d, got %d", len(all), total)
+	}
+	if total == 0 {
+		t.Fatal("expected at least one match for 'widget'")
+	}
+
+	paged, pagedTotal, err := s.Search(ctx, "widget", nil, 1, 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if pagedTotal != total {
+		t.Errorf("expected total to stay %d across the paged call, got %d", total, pagedTotal)
+	}
+	if len(paged) != 1 || paged[0].ID != all[1].ID {
+		t.Errorf("expected offset 1, limit 1 to return the second unpaged result %q, got %+v", all[1].ID, paged)
+	}
+}
+
+func TestStore_Search_TagOnly_OffsetAtTotalBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory %d", i), "memory", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", nil, 0, 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 1 {
+		t.Errorf("expected an offset one short of total to return the last match, got %d results, total %d", len(results), total)
+	}
+
+	results, total, err = s.Search(ctx, "", nil, 0, 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 0 {
+		t.Errorf("expected an offset equal to total to return nothing, got %d results, total %d", len(results), total)
+	}
+}
+
+func TestStore_Search_NegativeOffsetStartsAtTheBeginning(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Widget %d", i), "widget content", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", nil, 0, -1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 3 {
+		t.Errorf("expected a negative offset to behave as 0 on the tag-only path, got %d results, total %d", len(results), total)
+	}
+
+	zero, _, err := s.Search(ctx, "widget", nil, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	negative, _, err := s.Search(ctx, "widget", nil, 0, -1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(negative) != len(zero) {
+		t.Fatalf("expected a negative offset to behave as 0 on the ranked path, got %d results vs %d", len(negative), len(zero))
+	}
+	for i := range zero {
+		if negative[i].ID != zero[i].ID {
+			t.Errorf("expected offset -1 to return the same page as offset 0, got %+v vs %+v", negative, zero)
+			break
+		}
+	}
+}
+
+func TestStore_Search_TagFilter_TotalCountsOnlyFilteredMatches(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Kept %d", i), "memory", []string{"keep"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Dropped %d", i), "memory", []string{"drop"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", []string{"keep"}, 2, 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("expected total to count only the 3 tag_filter matches, got %d", total)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results after skipping 1 of 3 matches, got %d", len(results))
+	}
+	for _, r := range results {
+		if !strings.HasPrefix(r.Title, "Kept") {
+			t.Errorf("expected only tagged memories in the page, got %+v", r)
+		}
 	}
 }
 
@@ -274,7 +811,7 @@ func TestStore_Search_TagOnly_OrdersByCreatedAtChronologically(t *testing.T) {
 	newer.CreatedAt = "2026-01-01T10:00:00.3Z"
 	bs.docs[idNew] = newer
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -297,7 +834,7 @@ func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0)
+	results, _, err := s.Search(ctx, "cluster admin notes", []string{"kubernetes"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -412,6 +949,148 @@ func TestStore_Update_TagsOnly(t *testing.T) {
 	}
 }
 
+func TestStore_Update_AddTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"kept"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"New"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kept", "new"}
+	if len(mem.Tags) != len(want) || mem.Tags[0] != want[0] || mem.Tags[1] != want[1] {
+		t.Errorf("expected add_tags to union with the existing set (normalized to lowercase), got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_RemoveTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"keep", "drop"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{RemoveTags: []string{"DROP"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "keep" {
+		t.Errorf("expected remove_tags to drop only the listed tag (case-insensitively), got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddAndRemoveTagsTogether(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"old"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"new"}, RemoveTags: []string{"old"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "new" {
+		t.Errorf("expected add_tags and remove_tags combined to swap the tag, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddTagsSameAsRemoveTagsEndsUpRemoved(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"existing"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"contested"}, RemoveTags: []string{"contested"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "existing" {
+		t.Errorf("expected a tag listed in both add_tags and remove_tags to end up removed, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddTagsWithContentAlsoTriggersReembed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "old content", []string{"kept"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newContent := "new content"
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent, AddTags: []string{"new"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Content != "new content" {
+		t.Errorf("expected content updated, got %q", mem.Content)
+	}
+	want := []string{"kept", "new"}
+	if len(mem.Tags) != len(want) || mem.Tags[0] != want[0] || mem.Tags[1] != want[1] {
+		t.Errorf("expected add_tags applied alongside a reembedding update, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddRemoveTags_NormalizesLegacyMixedCaseBase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := s.(*boltStore)
+	mem := bs.docs[id]
+	mem.Tags = []string{"Kubernetes"}
+	bs.docs[id] = mem
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"kubernetes"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "kubernetes" {
+		t.Errorf("expected add_tags of an already-present (but differently-cased) legacy tag not to duplicate it, got %v", got.Tags)
+	}
+}
+
 func TestStore_Update_NotFound(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -461,7 +1140,7 @@ func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0 word1 word2", "", 0)
+	results, _, err := s.Search(ctx, "word0 word1 word2", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -491,7 +1170,7 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0", "", 0)
+	results, _, err := s.Search(ctx, "word0", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -522,7 +1201,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, err := s.Search(ctx, "word0", "", 0)
+	results, _, err := s.Search(ctx, "word0", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -620,7 +1299,7 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, err := s.Search(ctx, "word0 word1", "", 0)
+	results, _, err := s.Search(ctx, "word0 word1", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -645,7 +1324,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0)
+	results, _, err := s.Search(ctx, "memory item", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
@@ -664,7 +1343,7 @@ func TestStore_Search_QueryLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 3)
+	results, _, err := s.Search(ctx, "memory item", nil, 3, 0)
 	if err != nil {
 		t.Fatalf("Search with limit: %v", err)
 	}
@@ -691,11 +1370,114 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search after concurrent adds: %v", err)
 	}
 	if len(results) != goroutines {
 		t.Errorf("expected %d memories after concurrent adds, got %d", goroutines, len(results))
+	}
+}
+
+// blockMarker is embedded in a test's content so the test embedding function
+// can single out that one call to block or fail on.
+const blockMarker = "BLOCKME"
+
+// TestStore_Update_ConcurrentTagPatchDuringReembedIsNotLost guards against a
+// regression where Update's re-embed branch resolved add_tags/remove_tags
+// against the snapshot it read before embedding. Embedding runs without the
+// lock, so a tags-only update committing in that window was silently
+// overwritten. The patch must be applied to the record as it is at commit
+// time instead.
+func TestStore_Update_ConcurrentTagPatchDuringReembedIsNotLost(t *testing.T) {
+	ctx := context.Background()
+	embedding := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := newTestStoreWithEmb(t, func(ctx context.Context, text string) ([]float32, error) {
+		if strings.Contains(text, blockMarker) {
+			select {
+			case embedding <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return testEmbedFunc(ctx, text)
+	})
+
+	id, err := s.Add(ctx, "A", "original", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := "updated content " + blockMarker
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Update(ctx, id, MemoryUpdate{Content: &newContent, AddTags: []string{"x"}})
+	}()
+
+	<-embedding // the re-embed branch has taken its snapshot and is embedding
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"y"}}); err != nil {
+		t.Fatalf("concurrent tags-only update: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("content+add_tags update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(mem.Tags, "x") || !containsID(mem.Tags, "y") {
+		t.Errorf("expected both concurrently added tags, got %v", mem.Tags)
+	}
+	if mem.Content != newContent {
+		t.Errorf("expected the content update to apply, got %q", mem.Content)
+	}
+}
+
+// TestStore_Update_EmbeddingFailureLeavesLinksUnchanged guards the ordering
+// that keeps a failed update atomic from the caller's point of view: links are
+// synced only after embedding succeeds, so an embedding backend outage during
+// "change the content and add a link" leaves neither half applied.
+func TestStore_Update_EmbeddingFailureLeavesLinksUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithEmb(t, func(ctx context.Context, text string) ([]float32, error) {
+		if strings.Contains(text, blockMarker) {
+			return nil, fmt.Errorf("embedding backend down")
+		}
+		return testEmbedFunc(ctx, text)
+	})
+
+	aID, err := s.Add(ctx, "A", "a", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	bID, err := s.Add(ctx, "B", "b", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := "updated content " + blockMarker
+	if err := s.Update(ctx, aID, MemoryUpdate{Content: &newContent, AddLinkedIDs: []string{bID}}); err == nil {
+		t.Fatal("expected the update to fail when embedding fails")
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.LinkedIDs) != 0 {
+		t.Errorf("expected no link on A after a failed update, got %v", a.LinkedIDs)
+	}
+	if a.Content != "a" {
+		t.Errorf("expected A's content unchanged, got %q", a.Content)
+	}
+	b, err := s.GetByID(ctx, bID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.LinkedIDs) != 0 {
+		t.Errorf("expected no back-link on B after a failed update, got %v", b.LinkedIDs)
 	}
 }

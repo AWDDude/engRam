@@ -66,9 +66,18 @@ type storeMemoryArgs struct {
 }
 
 type searchMemoryArgs struct {
-	Query     string `json:"query"`
-	TagFilter string `json:"tag_filter"`
-	Limit     *int   `json:"limit"`
+	Query     string   `json:"query"`
+	TagFilter []string `json:"tag_filter"`
+	Limit     *int     `json:"limit"`
+	Offset    int      `json:"offset"`
+}
+
+// searchMemoryResponse wraps the result page with total, the count of
+// matches before limit/offset were applied, so a paginating caller can tell
+// whether it has walked to the end.
+type searchMemoryResponse struct {
+	Results []store.SearchResult `json:"results"`
+	Total   int                  `json:"total"`
 }
 
 type retrieveMemoryArgs struct {
@@ -80,11 +89,15 @@ type deleteMemoryArgs struct {
 }
 
 type updateMemoryArgs struct {
-	MemoryID  string    `json:"memory_id"`
-	Title     *string   `json:"title"`
-	Content   *string   `json:"content"`
-	Tags      *[]string `json:"tags"`
-	LinkedIDs *[]string `json:"linked_ids"`
+	MemoryID        string    `json:"memory_id"`
+	Title           *string   `json:"title"`
+	Content         *string   `json:"content"`
+	Tags            *[]string `json:"tags"`
+	AddTags         []string  `json:"add_tags"`
+	RemoveTags      []string  `json:"remove_tags"`
+	LinkedIDs       *[]string `json:"linked_ids"`
+	AddLinkedIDs    []string  `json:"add_linked_ids"`
+	RemoveLinkedIDs []string  `json:"remove_linked_ids"`
 }
 
 func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -117,16 +130,13 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if err := req.BindArguments(&args); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid arguments: %v", err)), nil
 	}
-	if args.Query == "" && args.TagFilter == "" {
-		return mcp.NewToolResultError("at least one of query or tag_filter is required"), nil
-	}
 
 	limit := a.defaultLimit
 	if args.Limit != nil {
 		limit = *args.Limit
 	}
 
-	results, err := a.store.Search(ctx, args.Query, args.TagFilter, limit)
+	results, total, err := a.store.Search(ctx, args.Query, args.TagFilter, limit, args.Offset)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}
@@ -134,7 +144,23 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 		results = []store.SearchResult{}
 	}
 
-	out, err := json.Marshal(results)
+	out, err := json.Marshal(searchMemoryResponse{Results: results, Total: total})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(out)), nil
+}
+
+func (a *App) handleListTags(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	tags, err := a.store.Tags(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("list_tags error: %v", err)), nil
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+
+	out, err := json.Marshal(tags)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
 	}
@@ -212,8 +238,16 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if args.MemoryID == "" {
 		return mcp.NewToolResultError("memory_id is required"), nil
 	}
-	if args.Title == nil && args.Content == nil && args.Tags == nil && args.LinkedIDs == nil {
-		return mcp.NewToolResultError("at least one of title, content, tags, or linked_ids is required"), nil
+	if args.Tags != nil && (len(args.AddTags) > 0 || len(args.RemoveTags) > 0) {
+		return mcp.NewToolResultError("tags cannot be combined with add_tags or remove_tags: use tags to replace the whole set, or add_tags/remove_tags to change it incrementally"), nil
+	}
+	if args.LinkedIDs != nil && (len(args.AddLinkedIDs) > 0 || len(args.RemoveLinkedIDs) > 0) {
+		return mcp.NewToolResultError("linked_ids cannot be combined with add_linked_ids or remove_linked_ids: use linked_ids to replace the whole set, or add_linked_ids/remove_linked_ids to change it incrementally"), nil
+	}
+	if args.Title == nil && args.Content == nil &&
+		args.Tags == nil && len(args.AddTags) == 0 && len(args.RemoveTags) == 0 &&
+		args.LinkedIDs == nil && len(args.AddLinkedIDs) == 0 && len(args.RemoveLinkedIDs) == 0 {
+		return mcp.NewToolResultError("at least one of title, content, tags, add_tags, remove_tags, linked_ids, add_linked_ids, or remove_linked_ids is required"), nil
 	}
 	if args.Title != nil {
 		if err := validateTitle(*args.Title); err != nil {
@@ -227,10 +261,14 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 	}
 
 	patch := store.MemoryUpdate{
-		Title:     args.Title,
-		Content:   args.Content,
-		Tags:      args.Tags,
-		LinkedIDs: args.LinkedIDs,
+		Title:           args.Title,
+		Content:         args.Content,
+		Tags:            args.Tags,
+		AddTags:         args.AddTags,
+		RemoveTags:      args.RemoveTags,
+		LinkedIDs:       args.LinkedIDs,
+		AddLinkedIDs:    args.AddLinkedIDs,
+		RemoveLinkedIDs: args.RemoveLinkedIDs,
 	}
 	if err := a.store.Update(ctx, args.MemoryID, patch); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("update error: %v", err)), nil

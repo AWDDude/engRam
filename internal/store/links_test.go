@@ -270,6 +270,140 @@ func TestLinks_UpdateReplaceLinks_AddAndRemoveInOneCall(t *testing.T) {
 	}
 }
 
+func TestLinks_UpdateAddLinkedIDs_PreservesExistingLinks(t *testing.T) {
+	// The exact issue #5 scenario: adding one link to a memory that already
+	// has others must not wipe them.
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+	cID, _ := s.Add(ctx, "C", "c", nil, nil)
+	aID, _ := s.Add(ctx, "A", "a", nil, []string{bID})
+
+	if err := s.Update(ctx, aID, MemoryUpdate{AddLinkedIDs: []string{cID}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(a.LinkedIDs, bID) || !containsID(a.LinkedIDs, cID) {
+		t.Errorf("expected A linked to both the original B and the newly added C, got %v", a.LinkedIDs)
+	}
+	b, err := s.GetByID(ctx, bID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(b.LinkedIDs, aID) {
+		t.Errorf("expected B's link back to A preserved, got %v", b.LinkedIDs)
+	}
+	c, err := s.GetByID(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(c.LinkedIDs, aID) {
+		t.Errorf("expected C linked back to A, got %v", c.LinkedIDs)
+	}
+}
+
+func TestLinks_UpdateRemoveLinkedIDs_LeavesOthersIntact(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+	cID, _ := s.Add(ctx, "C", "c", nil, nil)
+	aID, _ := s.Add(ctx, "A", "a", nil, []string{bID, cID})
+
+	if err := s.Update(ctx, aID, MemoryUpdate{RemoveLinkedIDs: []string{bID}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(a.LinkedIDs, bID) || !containsID(a.LinkedIDs, cID) {
+		t.Errorf("expected A linked only to C, got %v", a.LinkedIDs)
+	}
+	b, err := s.GetByID(ctx, bID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(b.LinkedIDs, aID) {
+		t.Errorf("expected B no longer linked to A, got %v", b.LinkedIDs)
+	}
+	c, err := s.GetByID(ctx, cID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(c.LinkedIDs, aID) {
+		t.Errorf("expected C's link to A preserved, got %v", c.LinkedIDs)
+	}
+}
+
+func TestLinks_UpdateAddAndRemoveLinkedIDsTogether(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+	cID, _ := s.Add(ctx, "C", "c", nil, nil)
+	aID, _ := s.Add(ctx, "A", "a", nil, []string{bID})
+
+	if err := s.Update(ctx, aID, MemoryUpdate{AddLinkedIDs: []string{cID}, RemoveLinkedIDs: []string{bID}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsID(a.LinkedIDs, bID) || !containsID(a.LinkedIDs, cID) {
+		t.Errorf("expected add_linked_ids and remove_linked_ids combined to swap the link, got %v", a.LinkedIDs)
+	}
+}
+
+func TestLinks_UpdateAddLinkedIDs_AlreadyLinkedIsNoop(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+	aID, _ := s.Add(ctx, "A", "a", nil, []string{bID})
+
+	if err := s.Update(ctx, aID, MemoryUpdate{AddLinkedIDs: []string{bID}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.LinkedIDs) != 1 || a.LinkedIDs[0] != bID {
+		t.Errorf("expected re-adding an existing link to be a no-op, got %v", a.LinkedIDs)
+	}
+}
+
+func TestLinks_UpdateAddLinkedIDs_UnknownIDFails(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	bID, _ := s.Add(ctx, "B", "b", nil, nil)
+	aID, _ := s.Add(ctx, "A", "a", nil, []string{bID})
+
+	err := s.Update(ctx, aID, MemoryUpdate{AddLinkedIDs: []string{"does-not-exist"}})
+	if err == nil {
+		t.Fatal("expected an error linking to a nonexistent memory")
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.LinkedIDs) != 1 || a.LinkedIDs[0] != bID {
+		t.Errorf("expected the existing link untouched after a failed add_linked_ids, got %v", a.LinkedIDs)
+	}
+}
+
 func TestLinks_UpdateLinksOnly_DoesNotReembed(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -340,7 +474,7 @@ func TestLinks_UpdateContentAlso_TriggersReembed(t *testing.T) {
 	}
 
 	// Confirm it's actually searchable under the new content.
-	results, err := s.Search(ctx, "brand new content", "", 0)
+	results, _, err := s.Search(ctx, "brand new content", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
