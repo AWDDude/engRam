@@ -59,13 +59,19 @@ type RetrieveResult struct {
 // slices, not pointers: nil and empty both mean "no change," since there's
 // no meaningful "clear via add/remove" the way an explicit empty Tags means
 // "clear all tags." A tag in both AddTags and RemoveTags ends up removed.
+//
+// LinkedIDs/AddLinkedIDs/RemoveLinkedIDs follow the identical pattern for
+// links, resolved by syncLinks under its own lock so the base set they patch
+// against can't go stale between being read and being applied.
 type MemoryUpdate struct {
-	Title      *string
-	Content    *string
-	Tags       *[]string
-	AddTags    []string
-	RemoveTags []string
-	LinkedIDs  *[]string
+	Title           *string
+	Content         *string
+	Tags            *[]string
+	AddTags         []string
+	RemoveTags      []string
+	LinkedIDs       *[]string
+	AddLinkedIDs    []string
+	RemoveLinkedIDs []string
 }
 
 // Store is the persistence interface for memories.
@@ -191,6 +197,36 @@ func applyTagPatch(currentTags []string, patch MemoryUpdate) []string {
 		tags = out
 	}
 	return tags
+}
+
+// applyLinkPatch resolves a MemoryUpdate's link fields against
+// currentLinkedIDs, in the same fixed order as applyTagPatch: patch.LinkedIDs
+// (if given) replaces the set outright, then AddLinkedIDs unions in, then
+// RemoveLinkedIDs subtracts — so an id listed in both AddLinkedIDs and
+// RemoveLinkedIDs ends up removed. The result may still contain duplicates or
+// a self-reference; syncLinks runs it through normalizeLinks before use.
+func applyLinkPatch(currentLinkedIDs []string, patch MemoryUpdate) []string {
+	ids := currentLinkedIDs
+	if patch.LinkedIDs != nil {
+		ids = *patch.LinkedIDs
+	}
+	if len(patch.AddLinkedIDs) > 0 {
+		merged := make([]string, 0, len(ids)+len(patch.AddLinkedIDs))
+		merged = append(merged, ids...)
+		merged = append(merged, patch.AddLinkedIDs...)
+		ids = merged
+	}
+	if len(patch.RemoveLinkedIDs) > 0 {
+		remove := toSet(patch.RemoveLinkedIDs)
+		out := ids[:0:0]
+		for _, i := range ids {
+			if !remove[i] {
+				out = append(out, i)
+			}
+		}
+		ids = out
+	}
+	return ids
 }
 
 // dedupeStrings removes duplicate values, preserving first-seen order.

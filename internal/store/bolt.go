@@ -261,7 +261,7 @@ func (s *boltStore) Add(ctx context.Context, title, content string, tags, linked
 		return "", err
 	}
 	if len(linkedIDs) > 0 {
-		if _, err := s.syncLinks(id, linkedIDs); err != nil {
+		if _, err := s.syncLinks(id, MemoryUpdate{LinkedIDs: &linkedIDs}); err != nil {
 			// The memory itself was already persisted above; only the link
 			// side failed (e.g. an invalid linked ID). Return the ID so the
 			// caller isn't left with an orphaned record they can't address.
@@ -507,14 +507,16 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	patch.AddTags = normalizeTags(patch.AddTags)
 	patch.RemoveTags = normalizeTags(patch.RemoveTags)
 	tagsChanged := patch.Tags != nil || len(patch.AddTags) > 0 || len(patch.RemoveTags) > 0
+	linksChanged := patch.LinkedIDs != nil || len(patch.AddLinkedIDs) > 0 || len(patch.RemoveLinkedIDs) > 0
 
-	// linked_ids, if patched, is handled first and entirely by syncLinks,
-	// which validates and persists atomically. Everything below re-reads the
-	// current record under the lock before writing, so it can't clobber that
-	// (or a concurrent link change from another memory's Update) with a stale
+	// Links, if patched, are handled first and entirely by syncLinks, which
+	// resolves LinkedIDs/AddLinkedIDs/RemoveLinkedIDs against the current set
+	// and persists atomically. Everything below re-reads the current record
+	// under the lock before writing, so it can't clobber that (or a
+	// concurrent link change from another memory's Update) with a stale
 	// snapshot — each branch overwrites only the fields it actually patched.
-	if patch.LinkedIDs != nil {
-		if _, err := s.syncLinks(id, *patch.LinkedIDs); err != nil {
+	if linksChanged {
+		if _, err := s.syncLinks(id, patch); err != nil {
 			return err
 		}
 	}
@@ -523,7 +525,7 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 
 	if !needsReembed {
 		if !tagsChanged {
-			if patch.LinkedIDs == nil {
+			if !linksChanged {
 				// Nothing was patched at all; still report a not-found id.
 				_, err := s.GetByID(ctx, id)
 				return err
@@ -577,18 +579,21 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	return s.commit([]change{{mem: current, vectors: vectors}})
 }
 
-// syncLinks normalizes newLinks (self-reference and duplicates stripped),
-// validates every remaining ID exists, then updates id's LinkedIDs and every
-// peer whose LinkedIDs must change to keep the relationship bidirectional.
-// Returns the normalized link set that was applied.
+// syncLinks resolves patch's link fields (LinkedIDs replaces the set
+// outright; AddLinkedIDs/RemoveLinkedIDs adjust it incrementally, in the same
+// fixed order as applyTagPatch) against id's current LinkedIDs, normalizes
+// the result (self-reference and duplicates stripped), validates every
+// remaining ID exists, then updates id's LinkedIDs and every peer whose
+// LinkedIDs must change to keep the relationship bidirectional. Returns the
+// normalized link set that was applied.
 //
-// Validation and mutation happen under one lock and land in one transaction,
-// so a concurrent delete of a link target can't race a separate
-// validate-then-mutate window, and a mid-write failure can't leave one side of
-// a link updated without the other. On validation failure nothing is mutated.
-func (s *boltStore) syncLinks(id string, newLinks []string) ([]string, error) {
-	normalized := normalizeLinks(id, newLinks)
-
+// The base set is read, resolved, validated, and mutated all under one lock
+// and landed in one transaction, so a concurrent change to id's own link set
+// can't race the read AddLinkedIDs/RemoveLinkedIDs patch against, a
+// concurrent delete of a link target can't race validation, and a mid-write
+// failure can't leave one side of a link updated without the other. On
+// validation failure nothing is mutated.
+func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -596,6 +601,9 @@ func (s *boltStore) syncLinks(id string, newLinks []string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("memory %q not found", id)
 	}
+
+	normalized := normalizeLinks(id, applyLinkPatch(target.LinkedIDs, patch))
+
 	for _, linkID := range normalized {
 		if _, ok := s.docs[linkID]; !ok {
 			return nil, fmt.Errorf("linked memory %q not found", linkID)

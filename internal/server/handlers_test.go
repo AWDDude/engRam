@@ -91,7 +91,7 @@ func hasAllTagsForTest(tags, filters []string) bool {
 	return true
 }
 
-func dedupeTagsForTest(tags []string) []string {
+func dedupeStringsForTest(tags []string) []string {
 	seen := make(map[string]bool, len(tags))
 	out := make([]string, 0, len(tags))
 	for _, t := range tags {
@@ -150,7 +150,7 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 		mem.Tags = *patch.Tags
 	}
 	if len(patch.AddTags) > 0 {
-		mem.Tags = dedupeTagsForTest(append(append([]string{}, mem.Tags...), patch.AddTags...))
+		mem.Tags = dedupeStringsForTest(append(append([]string{}, mem.Tags...), patch.AddTags...))
 	}
 	if len(patch.RemoveTags) > 0 {
 		remove := make(map[string]bool, len(patch.RemoveTags))
@@ -167,6 +167,22 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 	}
 	if patch.LinkedIDs != nil {
 		mem.LinkedIDs = *patch.LinkedIDs
+	}
+	if len(patch.AddLinkedIDs) > 0 {
+		mem.LinkedIDs = dedupeStringsForTest(append(append([]string{}, mem.LinkedIDs...), patch.AddLinkedIDs...))
+	}
+	if len(patch.RemoveLinkedIDs) > 0 {
+		remove := make(map[string]bool, len(patch.RemoveLinkedIDs))
+		for _, t := range patch.RemoveLinkedIDs {
+			remove[t] = true
+		}
+		kept := mem.LinkedIDs[:0:0]
+		for _, t := range mem.LinkedIDs {
+			if !remove[t] {
+				kept = append(kept, t)
+			}
+		}
+		mem.LinkedIDs = kept
 	}
 	m.memories[id] = mem
 	return nil
@@ -1120,6 +1136,108 @@ func TestHandleUpdateMemory_AddTagsAloneSatisfiesAtLeastOneField(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("expected add_tags alone to satisfy the at-least-one-field requirement, got error: %v", result.Content)
+	}
+}
+
+func TestHandleUpdateMemory_AddLinkedIDs(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a", LinkedIDs: []string{"kept"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "add_linked_ids": []any{"new"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["a"].LinkedIDs
+	if len(got) != 2 || got[0] != "kept" || got[1] != "new" {
+		t.Errorf("expected add_linked_ids to union with the existing set, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_RemoveLinkedIDs(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a", LinkedIDs: []string{"keep", "drop"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "remove_linked_ids": []any{"drop"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["a"].LinkedIDs
+	if len(got) != 1 || got[0] != "keep" {
+		t.Errorf("expected remove_linked_ids to drop only the listed id, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_AddAndRemoveLinkedIDsTogether(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a", LinkedIDs: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "add_linked_ids": []any{"new"}, "remove_linked_ids": []any{"old"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["a"].LinkedIDs
+	if len(got) != 1 || got[0] != "new" {
+		t.Errorf("expected add_linked_ids and remove_linked_ids combined to swap the link, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_LinkedIDsRejectsCombinationWithAddLinkedIDs(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a", LinkedIDs: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "linked_ids": []any{"new"}, "add_linked_ids": []any{"extra"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected combining linked_ids with add_linked_ids to be rejected")
+	}
+}
+
+func TestHandleUpdateMemory_LinkedIDsRejectsCombinationWithRemoveLinkedIDs(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a", LinkedIDs: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "linked_ids": []any{"new"}, "remove_linked_ids": []any{"old"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected combining linked_ids with remove_linked_ids to be rejected")
+	}
+}
+
+func TestHandleUpdateMemory_AddLinkedIDsAloneSatisfiesAtLeastOneField(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "a"}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "a", "add_linked_ids": []any{"new"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected add_linked_ids alone to satisfy the at-least-one-field requirement, got error: %v", result.Content)
 	}
 }
 
