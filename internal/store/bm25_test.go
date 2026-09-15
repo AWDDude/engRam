@@ -203,7 +203,7 @@ func TestSearch_ExactTokenBeatsDenseAlone(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "withLock", "", 0)
+	results, _, err := s.Search(ctx, "withLock", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}

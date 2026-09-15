@@ -60,7 +60,12 @@ type MemoryUpdate struct {
 // Store is the persistence interface for memories.
 type Store interface {
 	Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error)
-	Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error)
+	// Search returns a page of matches plus total, the number of candidates
+	// that matched before offset/limit were applied — for a ranked query this
+	// is the count after the relevance cutoff, for query == "" (a tag-only or
+	// unfiltered listing) it's the count of matching memories in the store.
+	// Callers use total to tell whether they've paged through everything.
+	Search(ctx context.Context, query, tagFilter string, limit, offset int) (results []SearchResult, total int, err error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id string, patch MemoryUpdate) error

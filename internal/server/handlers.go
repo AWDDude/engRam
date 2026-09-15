@@ -69,6 +69,15 @@ type searchMemoryArgs struct {
 	Query     string `json:"query"`
 	TagFilter string `json:"tag_filter"`
 	Limit     *int   `json:"limit"`
+	Offset    int    `json:"offset"`
+}
+
+// searchMemoryResponse wraps the result page with total, the count of
+// matches before limit/offset were applied, so a paginating caller can tell
+// whether it has walked to the end.
+type searchMemoryResponse struct {
+	Results []store.SearchResult `json:"results"`
+	Total   int                  `json:"total"`
 }
 
 type retrieveMemoryArgs struct {
@@ -117,16 +126,13 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	if err := req.BindArguments(&args); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid arguments: %v", err)), nil
 	}
-	if args.Query == "" && args.TagFilter == "" {
-		return mcp.NewToolResultError("at least one of query or tag_filter is required"), nil
-	}
 
 	limit := a.defaultLimit
 	if args.Limit != nil {
 		limit = *args.Limit
 	}
 
-	results, err := a.store.Search(ctx, args.Query, args.TagFilter, limit)
+	results, total, err := a.store.Search(ctx, args.Query, args.TagFilter, limit, args.Offset)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}
@@ -134,7 +140,7 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 		results = []store.SearchResult{}
 	}
 
-	out, err := json.Marshal(results)
+	out, err := json.Marshal(searchMemoryResponse{Results: results, Total: total})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
 	}

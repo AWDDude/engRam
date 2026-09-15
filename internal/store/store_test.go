@@ -133,7 +133,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, err := s.Search(ctx, "anything", "", 0)
+	results, _, err := s.Search(ctx, "anything", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "terminal preferences", "", 0)
+	results, _, err := s.Search(ctx, "terminal preferences", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "some content", "", 0)
+	results, _, err := s.Search(ctx, "some content", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestStore_Search_TagOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "KUBE", 0)
+	results, _, err := s.Search(ctx, "", "KUBE", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestStore_Search_TagOnly_All(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -240,12 +240,78 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "", "", 3)
+	results, _, err := s.Search(ctx, "", "", 3, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(results) != 3 {
 		t.Errorf("expected 3 results with limit, got %d", len(results))
+	}
+}
+
+func TestStore_Search_TagOnly_OffsetAndTotal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory %d", i), "memory", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", "", 2, 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected total 5, got %d", total)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results after skipping 3 of 5, got %d", len(results))
+	}
+
+	results, total, err = s.Search(ctx, "", "", 0, 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected total 5 even when offset exceeds it, got %d", total)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected no results when offset exceeds the match count, got %d", len(results))
+	}
+}
+
+func TestStore_Search_Query_OffsetAndTotal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Widget %d", i), "widget content", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, total, err := s.Search(ctx, "widget", "", 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != len(all) {
+		t.Errorf("expected total to equal the unpaged result count %d, got %d", len(all), total)
+	}
+	if total == 0 {
+		t.Fatal("expected at least one match for 'widget'")
+	}
+
+	paged, pagedTotal, err := s.Search(ctx, "widget", "", 1, 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if pagedTotal != total {
+		t.Errorf("expected total to stay %d across the paged call, got %d", total, pagedTotal)
+	}
+	if len(paged) != 1 || paged[0].ID != all[1].ID {
+		t.Errorf("expected offset 1, limit 1 to return the second unpaged result %q, got %+v", all[1].ID, paged)
 	}
 }
 
@@ -274,7 +340,7 @@ func TestStore_Search_TagOnly_OrdersByCreatedAtChronologically(t *testing.T) {
 	newer.CreatedAt = "2026-01-01T10:00:00.3Z"
 	bs.docs[idNew] = newer
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -297,7 +363,7 @@ func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0)
+	results, _, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -461,7 +527,7 @@ func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0 word1 word2", "", 0)
+	results, _, err := s.Search(ctx, "word0 word1 word2", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -491,7 +557,7 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, err := s.Search(ctx, "word0", "", 0)
+	results, _, err := s.Search(ctx, "word0", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -522,7 +588,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, err := s.Search(ctx, "word0", "", 0)
+	results, _, err := s.Search(ctx, "word0", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -620,7 +686,7 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, err := s.Search(ctx, "word0 word1", "", 0)
+	results, _, err := s.Search(ctx, "word0 word1", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -645,7 +711,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 0)
+	results, _, err := s.Search(ctx, "memory item", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
@@ -664,7 +730,7 @@ func TestStore_Search_QueryLimit(t *testing.T) {
 		}
 	}
 
-	results, err := s.Search(ctx, "memory item", "", 3)
+	results, _, err := s.Search(ctx, "memory item", "", 3, 0)
 	if err != nil {
 		t.Fatalf("Search with limit: %v", err)
 	}
@@ -691,7 +757,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	results, err := s.Search(ctx, "", "", 0)
+	results, _, err := s.Search(ctx, "", "", 0, 0)
 	if err != nil {
 		t.Fatalf("Search after concurrent adds: %v", err)
 	}

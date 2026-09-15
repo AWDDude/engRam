@@ -325,19 +325,19 @@ func (s *boltStore) embedChunks(ctx context.Context, title, content string) ([][
 //
 // query == "" switches to a tag-only scan — callers outside the MCP layer
 // (export, reembed) may also pass both query and tagFilter empty to mean
-// "everything"; the "at least one required" rule is enforced by the MCP
-// handler, not here. limit <= 0 means unlimited.
-func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]SearchResult, error) {
+// "everything". limit <= 0 means unlimited; offset <= 0 means from the start.
+func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit, offset int) ([]SearchResult, int, error) {
 	if query == "" {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return toSearchResults(s.listLocked(tagFilter, limit)), nil
+		page, total := s.listLocked(tagFilter, limit, offset)
+		return toSearchResults(page), total, nil
 	}
 
 	// Embedding is slow and needs no lock; do it before taking one.
 	qv, err := s.embed(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("embedding query: %w", err)
+		return nil, 0, fmt.Errorf("embedding query: %w", err)
 	}
 
 	s.mu.RLock()
@@ -349,6 +349,14 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit i
 	)
 
 	ranked := applyRelativeCutoff(rankedIDs(fused), fused, rrfRelativeCutoff)
+	total := len(ranked)
+	if offset > 0 {
+		if offset >= len(ranked) {
+			ranked = nil
+		} else {
+			ranked = ranked[offset:]
+		}
+	}
 	if limit > 0 && len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
@@ -358,7 +366,7 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit i
 		mem := s.docs[id]
 		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // denseScoresLocked scores every memory by its best-matching chunk, then keeps
@@ -400,8 +408,10 @@ func (s *boltStore) sparseScoresLocked(query, tagFilter string) map[string]float
 	return keepWithinBand(scores, sparseCandidateBand)
 }
 
-// listLocked returns matching memories newest-first. Callers must hold s.mu.
-func (s *boltStore) listLocked(tagFilter string, limit int) []Memory {
+// listLocked returns a page of matching memories newest-first, plus total,
+// the count of matches before offset/limit were applied. Callers must hold
+// s.mu.
+func (s *boltStore) listLocked(tagFilter string, limit, offset int) (page []Memory, total int) {
 	results := make([]Memory, 0, len(s.docs))
 	for _, mem := range s.docs {
 		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
@@ -427,10 +437,18 @@ func (s *boltStore) listLocked(tagFilter string, limit int) []Memory {
 		}
 		return results[i].ID < results[j].ID
 	})
+	total = len(results)
+	if offset > 0 {
+		if offset >= len(results) {
+			results = nil
+		} else {
+			results = results[offset:]
+		}
+	}
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
 	}
-	return results
+	return results, total
 }
 
 func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {

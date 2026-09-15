@@ -44,34 +44,42 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 	return id, nil
 }
 
-func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
+func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit, offset int) ([]store.SearchResult, int, error) {
 	if m.searchErr != nil {
-		return nil, m.searchErr
+		return nil, 0, m.searchErr
 	}
-	var results []store.SearchResult
+	var matched []store.SearchResult
 	for _, mem := range m.memories {
 		if query != "" && !strings.Contains(mem.Content, query) && !strings.Contains(mem.Title, query) {
 			continue
 		}
 		if tagFilter != "" {
 			// Case-insensitive, matching store.hasMatchingTag's production semantics.
-			matched := false
+			tagMatched := false
 			for _, tag := range mem.Tags {
 				if strings.Contains(strings.ToLower(tag), strings.ToLower(tagFilter)) {
-					matched = true
+					tagMatched = true
 					break
 				}
 			}
-			if !matched {
+			if !tagMatched {
 				continue
 			}
 		}
-		results = append(results, store.SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
-		if limit > 0 && len(results) >= limit {
-			break
+		matched = append(matched, store.SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+	}
+	total := len(matched)
+	if offset > 0 {
+		if offset >= len(matched) {
+			matched = nil
+		} else {
+			matched = matched[offset:]
 		}
 	}
-	return results, nil
+	if limit > 0 && len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, total, nil
 }
 
 func (m *mockStore) GetByID(_ context.Context, id string) (store.Memory, error) {
@@ -117,9 +125,9 @@ type captureSearchArgsStore struct {
 	onSearch func(limit int)
 }
 
-func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, limit int) ([]store.SearchResult, error) {
+func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, limit, offset int) ([]store.SearchResult, int, error) {
 	c.onSearch(limit)
-	return c.mockStore.Search(ctx, query, tagFilter, limit)
+	return c.mockStore.Search(ctx, query, tagFilter, limit, offset)
 }
 
 // testMaxContentChars is generous enough that content-size limits never
@@ -310,11 +318,11 @@ func TestHandleSearchMemory_Success(t *testing.T) {
 		t.Fatalf("unexpected error result: %v", result.Content)
 	}
 
-	var results []store.SearchResult
-	if err := json.Unmarshal([]byte(resultText(t, result)), &results); err != nil {
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
 		t.Fatalf("parsing results: %v", err)
 	}
-	if len(results) == 0 {
+	if len(resp.Results) == 0 {
 		t.Error("expected at least one result")
 	}
 }
@@ -356,12 +364,12 @@ func TestHandleSearchMemory_TagFilterOnly(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
 
-	var results []store.SearchResult
-	if err := json.Unmarshal([]byte(resultText(t, result)), &results); err != nil {
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
 		t.Fatalf("parsing results: %v", err)
 	}
-	if len(results) != 1 || results[0].ID != "a" {
-		t.Errorf("expected 1 kubernetes memory, got %d", len(results))
+	if len(resp.Results) != 1 || resp.Results[0].ID != "a" {
+		t.Errorf("expected 1 kubernetes memory, got %d", len(resp.Results))
 	}
 }
 
@@ -379,25 +387,36 @@ func TestHandleSearchMemory_TagFilterIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
 
-	var results []store.SearchResult
-	if err := json.Unmarshal([]byte(resultText(t, result)), &results); err != nil {
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
 		t.Fatalf("parsing results: %v", err)
 	}
-	if len(results) != 1 || results[0].ID != "a" {
-		t.Errorf("expected a case-insensitive tag_filter to still match, got %d results", len(results))
+	if len(resp.Results) != 1 || resp.Results[0].ID != "a" {
+		t.Errorf("expected a case-insensitive tag_filter to still match, got %d results", len(resp.Results))
 	}
 }
 
-func TestHandleSearchMemory_RequiresQueryOrTagFilter(t *testing.T) {
-	app := newTestApp(newMockStore())
-	req := makeRequest(map[string]any{})
+func TestHandleSearchMemory_NoArgsListsEverything(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a"}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "content b"}
+	app := newTestApp(ms)
 
+	req := makeRequest(map[string]any{})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.IsError {
-		t.Error("expected error result when neither query nor tag_filter is given")
+	if result.IsError {
+		t.Fatalf("expected omitting both query and tag_filter to list everything, got error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(resp.Results) != 2 || resp.Total != 2 {
+		t.Errorf("expected both memories listed with total 2, got %d results, total %d", len(resp.Results), resp.Total)
 	}
 }
 
@@ -436,10 +455,38 @@ func TestHandleSearchMemory_ReturnsResults(t *testing.T) {
 		t.Fatalf("unexpected error: %v", result.Content)
 	}
 
-	var results []store.SearchResult
-	json.Unmarshal([]byte(resultText(t, result)), &results) //nolint:errcheck
-	if len(results) != 10 {
-		t.Errorf("expected 10 results, got %d", len(results))
+	var resp searchMemoryResponse
+	json.Unmarshal([]byte(resultText(t, result)), &resp) //nolint:errcheck
+	if len(resp.Results) != 10 {
+		t.Errorf("expected 10 results, got %d", len(resp.Results))
+	}
+}
+
+func TestHandleSearchMemory_OffsetAndTotal(t *testing.T) {
+	ms := newMockStore()
+	for i := 0; i < 5; i++ {
+		ms.memories[fmt.Sprintf("id-%d", i)] = store.Memory{ID: fmt.Sprintf("id-%d", i), Title: "Item", Content: "item"}
+	}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"query": "item", "limit": 2, "offset": 3})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if resp.Total != 5 {
+		t.Errorf("expected total 5, got %d", resp.Total)
+	}
+	if len(resp.Results) != 2 {
+		t.Errorf("expected 2 results after skipping 3 of 5, got %d", len(resp.Results))
 	}
 }
 
