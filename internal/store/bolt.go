@@ -508,60 +508,52 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	patch.RemoveTags = normalizeTags(patch.RemoveTags)
 	tagsChanged := patch.Tags != nil || len(patch.AddTags) > 0 || len(patch.RemoveTags) > 0
 	linksChanged := patch.LinkedIDs != nil || len(patch.AddLinkedIDs) > 0 || len(patch.RemoveLinkedIDs) > 0
+	needsReembed := patch.Title != nil || patch.Content != nil
 
-	// Links, if patched, are handled first and entirely by syncLinks, which
-	// resolves LinkedIDs/AddLinkedIDs/RemoveLinkedIDs against the current set
-	// and persists atomically. Everything below re-reads the current record
-	// under the lock before writing, so it can't clobber that (or a
-	// concurrent link change from another memory's Update) with a stale
-	// snapshot — each branch overwrites only the fields it actually patched.
+	var (
+		title, content string
+		vectors        [][]float32
+	)
+	if needsReembed {
+		existing, err := s.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		title, content = existing.Title, existing.Content
+		if patch.Title != nil {
+			title = *patch.Title
+		}
+		if patch.Content != nil {
+			content = *patch.Content
+		}
+		// Embedding is slow and needs no lock, but it can also fail, so it
+		// runs before anything is persisted: a backend outage then leaves the
+		// record (and its links) exactly as it was, rather than committing
+		// half the patch.
+		vectors, err = s.embedChunks(ctx, title, content)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Links, if patched, are handled entirely by syncLinks, which resolves
+	// LinkedIDs/AddLinkedIDs/RemoveLinkedIDs against the current set and
+	// persists atomically. Everything below re-reads the current record under
+	// the lock before writing, so it can't clobber that (or a concurrent link
+	// change from another memory's Update) with a stale snapshot — each branch
+	// overwrites only the fields it actually patched.
 	if linksChanged {
 		if _, err := s.syncLinks(id, patch); err != nil {
 			return err
 		}
 	}
 
-	needsReembed := patch.Title != nil || patch.Content != nil
-
-	if !needsReembed {
-		if !tagsChanged {
-			if !linksChanged {
-				// Nothing was patched at all; still report a not-found id.
-				_, err := s.GetByID(ctx, id)
-				return err
-			}
+	if !needsReembed && !tagsChanged {
+		if linksChanged {
 			return nil // syncLinks above already persisted the only change.
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		current, ok := s.docs[id]
-		if !ok {
-			return fmt.Errorf("memory %q not found", id)
-		}
-		current.Tags = applyTagPatch(current.Tags, patch)
-		// vectors omitted: a tags-only change must not re-embed.
-		return s.commit([]change{{mem: current}})
-	}
-
-	existing, err := s.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	title := existing.Title
-	if patch.Title != nil {
-		title = *patch.Title
-	}
-	content := existing.Content
-	if patch.Content != nil {
-		content = *patch.Content
-	}
-	tags := existing.Tags
-	if tagsChanged {
-		tags = applyTagPatch(existing.Tags, patch)
-	}
-
-	vectors, err := s.embedChunks(ctx, title, content)
-	if err != nil {
+		// Nothing was patched at all; still report a not-found id.
+		_, err := s.GetByID(ctx, id)
 		return err
 	}
 
@@ -571,11 +563,18 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	if !ok {
 		return fmt.Errorf("memory %q not found", id)
 	}
+	if tagsChanged {
+		// Resolved against the record as it is now, not the snapshot read
+		// before embedding: an add/remove patch must not silently drop a tag
+		// another Update committed while this one was embedding.
+		current.Tags = applyTagPatch(current.Tags, patch)
+	}
+	if !needsReembed {
+		// vectors omitted: a tags-only change must not re-embed.
+		return s.commit([]change{{mem: current}})
+	}
 	current.Title = title
 	current.Content = content
-	if tagsChanged {
-		current.Tags = tags
-	}
 	return s.commit([]change{{mem: current, vectors: vectors}})
 }
 

@@ -34,12 +34,19 @@ func testEmbedFunc(_ context.Context, text string) ([]float32, error) {
 
 func newTestStore(t *testing.T) Store {
 	t.Helper()
+	return newTestStoreWithEmb(t, testEmbedFunc)
+}
+
+// newTestStoreWithEmb is newTestStore with a caller-supplied embedding
+// function, for tests that need embedding to block or fail on demand.
+func newTestStoreWithEmb(t *testing.T, embed EmbeddingFunc) Store {
+	t.Helper()
 	s, err := newBoltStoreWithEmb(
 		config.Config{
 			DB:    config.DBConfig{Path: t.TempDir()},
 			Model: config.ModelConfig{EmbeddingModel: "test-model"},
 		},
-		EmbeddingFunc(testEmbedFunc),
+		embed,
 	)
 	if err != nil {
 		t.Fatalf("creating test store: %v", err)
@@ -1369,5 +1376,108 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	if len(results) != goroutines {
 		t.Errorf("expected %d memories after concurrent adds, got %d", goroutines, len(results))
+	}
+}
+
+// blockMarker is embedded in a test's content so the test embedding function
+// can single out that one call to block or fail on.
+const blockMarker = "BLOCKME"
+
+// TestStore_Update_ConcurrentTagPatchDuringReembedIsNotLost guards against a
+// regression where Update's re-embed branch resolved add_tags/remove_tags
+// against the snapshot it read before embedding. Embedding runs without the
+// lock, so a tags-only update committing in that window was silently
+// overwritten. The patch must be applied to the record as it is at commit
+// time instead.
+func TestStore_Update_ConcurrentTagPatchDuringReembedIsNotLost(t *testing.T) {
+	ctx := context.Background()
+	embedding := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := newTestStoreWithEmb(t, func(ctx context.Context, text string) ([]float32, error) {
+		if strings.Contains(text, blockMarker) {
+			select {
+			case embedding <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return testEmbedFunc(ctx, text)
+	})
+
+	id, err := s.Add(ctx, "A", "original", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := "updated content " + blockMarker
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Update(ctx, id, MemoryUpdate{Content: &newContent, AddTags: []string{"x"}})
+	}()
+
+	<-embedding // the re-embed branch has taken its snapshot and is embedding
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"y"}}); err != nil {
+		t.Fatalf("concurrent tags-only update: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("content+add_tags update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(mem.Tags, "x") || !containsID(mem.Tags, "y") {
+		t.Errorf("expected both concurrently added tags, got %v", mem.Tags)
+	}
+	if mem.Content != newContent {
+		t.Errorf("expected the content update to apply, got %q", mem.Content)
+	}
+}
+
+// TestStore_Update_EmbeddingFailureLeavesLinksUnchanged guards the ordering
+// that keeps a failed update atomic from the caller's point of view: links are
+// synced only after embedding succeeds, so an embedding backend outage during
+// "change the content and add a link" leaves neither half applied.
+func TestStore_Update_EmbeddingFailureLeavesLinksUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithEmb(t, func(ctx context.Context, text string) ([]float32, error) {
+		if strings.Contains(text, blockMarker) {
+			return nil, fmt.Errorf("embedding backend down")
+		}
+		return testEmbedFunc(ctx, text)
+	})
+
+	aID, err := s.Add(ctx, "A", "a", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	bID, err := s.Add(ctx, "B", "b", nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	newContent := "updated content " + blockMarker
+	if err := s.Update(ctx, aID, MemoryUpdate{Content: &newContent, AddLinkedIDs: []string{bID}}); err == nil {
+		t.Fatal("expected the update to fail when embedding fails")
+	}
+
+	a, err := s.GetByID(ctx, aID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.LinkedIDs) != 0 {
+		t.Errorf("expected no link on A after a failed update, got %v", a.LinkedIDs)
+	}
+	if a.Content != "a" {
+		t.Errorf("expected A's content unchanged, got %q", a.Content)
+	}
+	b, err := s.GetByID(ctx, bID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.LinkedIDs) != 0 {
+		t.Errorf("expected no back-link on B after a failed update, got %v", b.LinkedIDs)
 	}
 }
