@@ -135,10 +135,11 @@ The CSV has columns `id, title, content, tags, linked_ids, created_at` (tags and
 | Tool | Required | Optional |
 |------|----------|----------|
 | `store` | `title` (≤100 chars), `content` (≤`max_content_chars`) | `tags`, `linked_ids` |
-| `search` | `query` and/or `tag_filter` (at least one) | `limit` (omit for the configured default; `0` for no cap) |
+| `search` | — | `query`, `tag_filter` (array of string), `limit` (omit for the configured default; `0` for no cap), `offset` |
+| `list_tags` | — | — |
 | `retrieve` | `memory_id` | — |
 | `delete` | `memory_id` | — |
-| `update` | `memory_id`, plus at least one of `title`, `content`, `tags`, `linked_ids` | — |
+| `update` | `memory_id`, plus at least one of `title`, `content`, `tags`, `add_tags`, `remove_tags`, `linked_ids`, `add_linked_ids`, `remove_linked_ids` | — |
 
 There is no `type` field — tags are the only categorization mechanism.
 
@@ -160,8 +161,39 @@ applied, a search often returns fewer results than the limit allows. That is
 the expected outcome for a narrow query, not a sign the limit was set too low;
 raising it will not surface the dropped matches.
 
-`search` returns only `{id, title, tags}` per match — use `retrieve` for full
-details, including the id/title/tags of linked memories.
+Omitting both `query` and `tag_filter` lists every memory instead, newest
+first, with no relevance filtering. That is the way to enumerate the whole
+store (audits, dedup checks, confirming a bulk edit touched everything).
+
+`offset` skips that many matches before `limit` is applied, for paging.
+
+`search` returns `{results: [{id, title, tags}, ...], total}`, where `total`
+is the number of matches before `offset` and `limit` were applied (after the
+relevance cutoff for a ranked query, or the full matching count when listing
+everything), so a caller knows it has seen everything once
+`offset + len(results) >= total`. Use `retrieve` for full details, including
+the id/title/tags of linked memories.
+
+Tags are normalized to lowercase on write (`store`, `update`) whatever case
+they are given in, and normalized again on every read path (`search`,
+`retrieve`, `list_tags`), so tags written before that rule existed still come
+back lowercased with no data migration. `tag_filter` takes one or more tags
+and matches by exact equality, not substring: a memory must carry every tag
+listed (AND semantics) to match. `list_tags` returns every distinct tag in
+use, sorted, so a caller can discover valid `tag_filter` values rather than
+guess at them.
+
+`update`'s `title` and `content` are each independently optional; omit either
+to leave it unchanged. Tags and links can each be changed two ways: `tags` and
+`linked_ids` replace the whole set, while `add_tags`/`remove_tags` and
+`add_linked_ids`/`remove_linked_ids` adjust it incrementally (union first,
+then subtract, so an entry in both ends up removed) without disturbing entries
+they do not mention. Combining `tags` with `add_tags`/`remove_tags` is
+rejected, as is `linked_ids` with `add_linked_ids`/`remove_linked_ids`: each
+pair is two ways of expressing the same patch. The incremental link forms
+exist so that adding one link does not require reading and replaying the whole
+existing set, which was previously the only option and lost data silently when
+a caller forgot.
 
 `linked_ids` are bidirectional: linking or unlinking a memory updates the
 memory on the other end too, and deleting one cascades the cleanup.
@@ -174,9 +206,14 @@ memory on the other end too, and deleting one cascades the cleanup.
 store(title="Editor preference", content="prefers dark mode", tags=["ui"])
 search(query="UI preferences")
 search(query="UI preferences", limit=5)
-search(tag_filter="kubernetes")
+search(query="UI preferences", limit=5, offset=5)
+search(tag_filter=["kubernetes", "networking"])
+search()                                   # every memory, newest first
+list_tags()
 retrieve(memory_id="<id>")
 update(memory_id="<id>", content="updated content")
+update(memory_id="<id>", add_tags=["ui"], remove_tags=["draft"])
+update(memory_id="<id>", add_linked_ids=["<other-id>"])
 delete(memory_id="<id>")
 ```
 
