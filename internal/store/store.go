@@ -104,21 +104,26 @@ type rawAdder interface {
 }
 
 // hasAllTags reports whether tags contains an exact, case-insensitive match
-// for every tag in filters. An empty filters matches everything.
+// for every tag in filters. An empty filters matches everything. It runs once
+// per memory on every filtered scan, so it compares in place rather than
+// building a lookup set: both sides are a handful of tags, and allocating a
+// map per memory cost more than the linear scan it saved.
 func hasAllTags(tags []string, filters []string) bool {
-	if len(filters) == 0 {
-		return true
-	}
-	have := make(map[string]bool, len(tags))
-	for _, tag := range tags {
-		have[strings.ToLower(tag)] = true
-	}
 	for _, f := range filters {
-		if !have[strings.ToLower(f)] {
+		if !containsFold(tags, f) {
 			return false
 		}
 	}
 	return true
+}
+
+func containsFold(tags []string, want string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(tag, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // chunkText splits text into overlapping word-based chunks. Returns a
