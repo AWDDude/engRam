@@ -129,7 +129,23 @@ func chunkText(text string) []string {
 func toSearchResults(mems []Memory) []SearchResult {
 	out := make([]SearchResult, 0, len(mems))
 	for _, mem := range mems {
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
+	}
+	return out
+}
+
+// normalizeTags lowercases every tag so two memories can't drift into
+// differently-cased "duplicate" tags, and tag_filter's exact match needs no
+// per-comparison case folding. Applied on write (Add, Update) and again on
+// every read path (GetByID, Search, Tags) so tags written before this rule
+// existed still come back lowercased without a data migration.
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return tags
+	}
+	out := make([]string, len(tags))
+	for i, t := range tags {
+		out[i] = strings.ToLower(t)
 	}
 	return out
 }

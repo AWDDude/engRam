@@ -55,7 +55,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description(contentDescription("The content to store", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
-				mcp.Description("Optional tags for categorization"),
+				mcp.Description("Optional tags for categorization. Stored lowercase regardless of the case given."),
 				mcp.WithStringItems(),
 			),
 			mcp.WithArray("linked_ids",
@@ -73,7 +73,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description("Search query (matches title and content, both semantically and by keyword). Omit along with tag_filter to list everything."),
 			),
 			mcp.WithArray("tag_filter",
-				mcp.Description("Filter by tag: exact, case-insensitive match (not substring). Pass one or more tags — a memory must have every listed tag to match (AND). Use the list_tags tool to discover valid tag values."),
+				mcp.Description("Filter by tag: exact match (not substring), case-insensitive since tags are stored lowercase regardless of the case given. Pass one or more tags — a memory must have every listed tag to match (AND). Use the list_tags tool to discover valid tag values."),
 				mcp.WithStringItems(),
 			),
 			mcp.WithInteger("limit",
@@ -88,7 +88,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("list_tags",
-			mcp.WithDescription("List every distinct tag currently used across stored memories, sorted alphabetically. Use this to discover valid tag_filter values before searching."),
+			mcp.WithDescription("List every distinct tag currently used across stored memories (all lowercase), sorted alphabetically. Use this to discover valid tag_filter values before searching."),
 		),
 		app.handleListTags,
 	)
@@ -129,7 +129,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 				mcp.Description(contentDescription("New content", app.maxContentChars)),
 			),
 			mcp.WithArray("tags",
-				mcp.Description("New tags (replaces the existing set)"),
+				mcp.Description("New tags (replaces the existing set). Stored lowercase regardless of the case given."),
 				mcp.WithStringItems(),
 			),
 			mcp.WithArray("linked_ids",

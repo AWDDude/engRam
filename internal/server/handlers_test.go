@@ -636,6 +636,55 @@ func TestHandleSearchMemory_TagFilterExactNotSubstring(t *testing.T) {
 	}
 }
 
+func TestHandleSearchMemory_TagFilterEmptyArrayMatchesEverything(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Content: "content a", Tags: []string{"x"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Content: "content b"}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"tag_filter": []any{}})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected an explicit empty tag_filter to be accepted, got error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(resp.Results) != 2 || resp.Total != 2 {
+		t.Errorf("expected an explicit empty tag_filter to behave like omitting it, got %d results, total %d", len(resp.Results), resp.Total)
+	}
+}
+
+func TestHandleSearchMemory_TagFilterMultipleTagsWithQuery(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "Both tags", Content: "cluster admin notes", Tags: []string{"kubernetes", "infra"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "One tag", Content: "cluster admin notes", Tags: []string{"kubernetes"}}
+	ms.memories["c"] = store.Memory{ID: "c", Title: "Both tags, other content", Content: "unrelated", Tags: []string{"kubernetes", "infra"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"query": "cluster admin notes", "tag_filter": []any{"kubernetes", "infra"}})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ID != "a" {
+		t.Errorf("expected a query plus multiple ANDed tag_filter values to narrow to one result, got %+v", resp.Results)
+	}
+}
+
 // --- list_tags ---
 
 func TestHandleListTags_ReturnsSortedDistinctTags(t *testing.T) {

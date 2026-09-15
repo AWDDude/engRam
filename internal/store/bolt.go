@@ -257,7 +257,7 @@ func (s *boltStore) commit(changes []change) error {
 func (s *boltStore) Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error) {
 	id := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.addMemory(ctx, id, title, content, tags, nil, now); err != nil {
+	if err := s.addMemory(ctx, id, title, content, normalizeTags(tags), nil, now); err != nil {
 		return "", err
 	}
 	if len(linkedIDs) > 0 {
@@ -366,7 +366,7 @@ func (s *boltStore) Search(ctx context.Context, query string, tagFilter []string
 	out := make([]SearchResult, 0, len(ranked))
 	for _, id := range ranked {
 		mem := s.docs[id]
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
 	}
 	return out, total, nil
 }
@@ -460,7 +460,7 @@ func (s *boltStore) Tags(_ context.Context) ([]string, error) {
 	defer s.mu.RUnlock()
 	seen := make(map[string]bool)
 	for _, mem := range s.docs {
-		for _, tag := range mem.Tags {
+		for _, tag := range normalizeTags(mem.Tags) {
 			seen[tag] = true
 		}
 	}
@@ -479,6 +479,7 @@ func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {
 	if !ok {
 		return Memory{}, fmt.Errorf("memory %q not found", id)
 	}
+	mem.Tags = normalizeTags(mem.Tags)
 	return mem, nil
 }
 
@@ -499,6 +500,11 @@ func (s *boltStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) error {
+	if patch.Tags != nil {
+		normalized := normalizeTags(*patch.Tags)
+		patch.Tags = &normalized
+	}
+
 	// linked_ids, if patched, is handled first and entirely by syncLinks,
 	// which validates and persists atomically. Everything below re-reads the
 	// current record under the lock before writing, so it can't clobber that

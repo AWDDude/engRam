@@ -250,6 +250,159 @@ func TestStore_Search_TagFilter_MultipleTagsIsAND(t *testing.T) {
 	}
 }
 
+func TestStore_Search_Query_TagFilter_ExactNotSubstring(t *testing.T) {
+	// A ranked query filters in denseScoresLocked and sparseScoresLocked, not
+	// in listLocked, so exactness has to be proven on that path separately.
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Entity note", "cluster admin notes", []string{"entity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Identity note", "cluster admin notes", []string{"workload-identity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "cluster admin notes", []string{"entity"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 1 || len(results) != 1 || results[0].Title != "Entity note" {
+		t.Errorf("expected a ranked query with tag_filter %q to match only the exact tag, not %q as a substring, got total %d and %+v", "entity", "workload-identity", total, results)
+	}
+}
+
+func TestStore_Search_Query_TagFilter_MultipleTagsIsAND(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "cluster admin notes", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "One tag", "cluster admin notes", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "cluster admin notes", []string{"kubernetes", "infra"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 1 || len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected multiple tag_filter values to AND together on the ranked path, got total %d and %+v", total, results)
+	}
+}
+
+func TestStore_Search_TagFilter_SubstringNeitherDirectionMatches(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Fact", "a plain fact", []string{"fact"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Artifact", "a build artifact", []string{"artifact"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Factoid", "a factoid", []string{"factoid"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Refactor", "a refactor", []string{"refactor"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"fact"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Fact" {
+		t.Errorf("expected tag_filter %q to match only the tag %q, not the tags containing it, got %+v", "fact", "fact", results)
+	}
+
+	results, _, err = s.Search(ctx, "", []string{"artifact"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Artifact" {
+		t.Errorf("expected tag_filter %q not to match the shorter tag %q it contains, got %+v", "artifact", "fact", results)
+	}
+}
+
+func TestStore_Search_TagFilter_EmptySliceMatchesEverything(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	alphaID, err := s.Add(ctx, "Alpha note", "alpha content", []string{"alpha"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Beta note", "beta content", []string{"beta"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "", []string{}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 || total != 2 {
+		t.Errorf("expected an empty tag_filter to match everything, got %d results, total %d", len(results), total)
+	}
+
+	results, _, err = s.Search(ctx, "alpha content", []string{}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == alphaID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected an empty tag_filter to leave a ranked query unfiltered, got %+v", results)
+	}
+}
+
+func TestStore_Search_TagFilter_UnknownTagMatchesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Kubernetes fact", "cluster admin notes", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, total, err := s.Search(ctx, "", []string{"no-such-tag"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 0 || total != 0 {
+		t.Errorf("expected a tag_filter no memory carries to match nothing, got %d results, total %d", len(results), total)
+	}
+
+	results, total, err = s.Search(ctx, "cluster admin notes", []string{"no-such-tag"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 0 || total != 0 {
+		t.Errorf("expected a ranked query with an unknown tag_filter to match nothing, got %d results, total %d", len(results), total)
+	}
+}
+
+func TestStore_Search_TagFilter_CaseInsensitiveAcrossMultipleValues(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "has both", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"Kubernetes", "INFRA"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected every tag_filter value to match case-insensitively, got %+v", results)
+	}
+}
+
 func TestStore_Tags_ReturnsSortedDistinctTags(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -287,6 +440,141 @@ func TestStore_Tags_EmptyStore(t *testing.T) {
 	}
 	if len(tags) != 0 {
 		t.Errorf("expected no tags for an empty store, got %v", tags)
+	}
+}
+
+func TestStore_Add_NormalizesTagsToLowercase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Mixed case tags", "content", []string{"Kubernetes", "INFRA"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kubernetes", "infra"}
+	if len(mem.Tags) != len(want) {
+		t.Fatalf("expected tags normalized to %v, got %v", want, mem.Tags)
+	}
+	for i := range want {
+		if mem.Tags[i] != want[i] {
+			t.Errorf("expected tags normalized to %v, got %v", want, mem.Tags)
+			break
+		}
+	}
+}
+
+func TestStore_Update_NormalizesTagsToLowercase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newTags := []string{"Golang", "Systems"}
+	if err := s.Update(ctx, id, MemoryUpdate{Tags: &newTags}); err != nil {
+		t.Fatal(err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"golang", "systems"}
+	if len(mem.Tags) != len(want) {
+		t.Fatalf("expected tags normalized to %v, got %v", want, mem.Tags)
+	}
+	for i := range want {
+		if mem.Tags[i] != want[i] {
+			t.Errorf("expected tags normalized to %v, got %v", want, mem.Tags)
+			break
+		}
+	}
+}
+
+func TestStore_Tags_CaseVariantsCollapseToOneEntry(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "A", "a", []string{"Kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "B", "b", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(tags) != 1 || tags[0] != "kubernetes" {
+		t.Errorf("expected mixed-case writes to normalize into one entry, got %v", tags)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"KUBERNETES"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected the normalized tag to filter to both memories, got %d results", len(results))
+	}
+}
+
+// TestStore_ReadPaths_NormalizeLegacyMixedCaseTags proves the self-healing
+// half of the lowercase rule: data written before normalization existed (or
+// restored verbatim by CSV import / reembed) still comes back lowercased on
+// every read path, without a data migration. It bypasses Add/Update to plant
+// mixed-case tags directly, the way TestStore_Search_TagOnly_OrdersByCreatedAtChronologically
+// bypasses them to control CreatedAt.
+func TestStore_ReadPaths_NormalizeLegacyMixedCaseTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Legacy", "cluster admin notes", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := s.(*boltStore)
+	mem := bs.docs[id]
+	mem.Tags = []string{"Kubernetes"}
+	bs.docs[id] = mem
+
+	got, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "kubernetes" {
+		t.Errorf("expected GetByID to normalize a legacy mixed-case tag, got %v", got.Tags)
+	}
+
+	tagOnly, _, err := s.Search(ctx, "", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tagOnly) != 1 || len(tagOnly[0].Tags) != 1 || tagOnly[0].Tags[0] != "kubernetes" {
+		t.Errorf("expected the tag-only Search path to normalize a legacy mixed-case tag, got %+v", tagOnly)
+	}
+
+	ranked, _, err := s.Search(ctx, "cluster admin notes", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranked) != 1 || len(ranked[0].Tags) != 1 || ranked[0].Tags[0] != "kubernetes" {
+		t.Errorf("expected the ranked-query Search path to normalize a legacy mixed-case tag, got %+v", ranked)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0] != "kubernetes" {
+		t.Errorf("expected list_tags to normalize a legacy mixed-case tag, got %v", tags)
 	}
 }
 
@@ -392,6 +680,102 @@ func TestStore_Search_Query_OffsetAndTotal(t *testing.T) {
 	}
 	if len(paged) != 1 || paged[0].ID != all[1].ID {
 		t.Errorf("expected offset 1, limit 1 to return the second unpaged result %q, got %+v", all[1].ID, paged)
+	}
+}
+
+func TestStore_Search_TagOnly_OffsetAtTotalBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Memory %d", i), "memory", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", nil, 0, 2)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 1 {
+		t.Errorf("expected an offset one short of total to return the last match, got %d results, total %d", len(results), total)
+	}
+
+	results, total, err = s.Search(ctx, "", nil, 0, 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 0 {
+		t.Errorf("expected an offset equal to total to return nothing, got %d results, total %d", len(results), total)
+	}
+}
+
+func TestStore_Search_NegativeOffsetStartsAtTheBeginning(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Widget %d", i), "widget content", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", nil, 0, -1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 || len(results) != 3 {
+		t.Errorf("expected a negative offset to behave as 0 on the tag-only path, got %d results, total %d", len(results), total)
+	}
+
+	zero, _, err := s.Search(ctx, "widget", nil, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	negative, _, err := s.Search(ctx, "widget", nil, 0, -1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(negative) != len(zero) {
+		t.Fatalf("expected a negative offset to behave as 0 on the ranked path, got %d results vs %d", len(negative), len(zero))
+	}
+	for i := range zero {
+		if negative[i].ID != zero[i].ID {
+			t.Errorf("expected offset -1 to return the same page as offset 0, got %+v vs %+v", negative, zero)
+			break
+		}
+	}
+}
+
+func TestStore_Search_TagFilter_TotalCountsOnlyFilteredMatches(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Kept %d", i), "memory", []string{"keep"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := s.Add(ctx, fmt.Sprintf("Dropped %d", i), "memory", []string{"drop"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, total, err := s.Search(ctx, "", []string{"keep"}, 2, 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("expected total to count only the 3 tag_filter matches, got %d", total)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results after skipping 1 of 3 matches, got %d", len(results))
+	}
+	for _, r := range results {
+		if !strings.HasPrefix(r.Title, "Kept") {
+			t.Errorf("expected only tagged memories in the page, got %+v", r)
+		}
 	}
 }
 
