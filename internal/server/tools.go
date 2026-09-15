@@ -72,8 +72,9 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 			mcp.WithString("query",
 				mcp.Description("Search query (matches title and content, both semantically and by keyword). Omit along with tag_filter to list everything."),
 			),
-			mcp.WithString("tag_filter",
-				mcp.Description("Filter by tag (case-insensitive substring match)"),
+			mcp.WithArray("tag_filter",
+				mcp.Description("Filter by tag: exact, case-insensitive match (not substring). Pass one or more tags — a memory must have every listed tag to match (AND). Use the list_tags tool to discover valid tag values."),
+				mcp.WithStringItems(),
 			),
 			mcp.WithInteger("limit",
 				mcp.Description(searchLimitDescription(app.defaultLimit)),
@@ -83,6 +84,13 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 			),
 		),
 		app.handleSearchMemory,
+	)
+
+	s.AddTool(
+		mcp.NewTool("list_tags",
+			mcp.WithDescription("List every distinct tag currently used across stored memories, sorted alphabetically. Use this to discover valid tag_filter values before searching."),
+		),
+		app.handleListTags,
 	)
 
 	s.AddTool(

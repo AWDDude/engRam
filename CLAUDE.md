@@ -101,11 +101,14 @@ internal/server/     # App + MCP handlers + RegisterTools
 | Tool | Required args | Optional args |
 |------|--------------|---------------|
 | `store` | title (≤100 chars), content | tags, linked_ids |
-| `search` | — | query, tag_filter, limit (omit = configured default; 0 = no cap), offset |
+| `search` | — | query, tag_filter (array), limit (omit = configured default; 0 = no cap), offset |
+| `list_tags` | — | — |
 | `retrieve` | memory_id | — |
 | `delete` | memory_id | — |
 | `update` | memory_id, plus at least one of: title, content, tags, linked_ids | — |
 
 `search` is hybrid: dense vector similarity and lexical BM25 fused by Reciprocal Rank Fusion, with titles and tags weighted above body text. Results are ranked and cut off relative to the best match, so there is no similarity threshold to configure. Omitting both `query` and `tag_filter` lists every memory instead, newest first, with no relevance filtering — the way to enumerate the store (audits, dedup checks, verifying a bulk operation touched everything).
+
+`tag_filter` takes one or more tags and matches by exact, case-insensitive equality (not substring) — a memory must carry every listed tag (AND semantics) to match. `list_tags` returns every distinct tag in use, sorted, so a caller can discover valid `tag_filter` values instead of guessing.
 
 `limit` inverts the usual convention: **omitting it caps results** at `default_limit`, while **passing 0 removes the cap** (negative behaves as 0). The relevance cutoff runs *before* `limit`, so fewer results than the limit is the normal outcome for a narrow query — raising the limit will not surface the dropped matches. In config, `default_limit: 0` makes uncapped the default, but a negative `default_limit` is rejected rather than treated as 0. `offset` skips that many matches before `limit` is applied, for paging. The response is `{results: [{id, title, tags}, ...], total}`, where `total` is the match count before `offset`/`limit` were applied (post-relevance-cutoff for a ranked query, or the full matching count when listing everything) — a caller knows it has seen everything once `offset + len(results) >= total`. Use `retrieve` for full details (including linked memories' id/title/tags). `linked_ids` are bidirectional — linking or unlinking a memory automatically updates the memories on the other end, and deleting a memory cascades the cleanup. There is no `type` field; tags are the only categorization mechanism.

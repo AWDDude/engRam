@@ -133,7 +133,7 @@ func TestStore_Search_EmptyCollection(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	results, _, err := s.Search(ctx, "anything", "", 0, 0)
+	results, _, err := s.Search(ctx, "anything", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search on empty collection: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestStore_Search_ReturnsResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, _, err := s.Search(ctx, "terminal preferences", "", 0, 0)
+	results, _, err := s.Search(ctx, "terminal preferences", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestStore_Search_ResultShapeOnlyHasIDTitleTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, _, err := s.Search(ctx, "some content", "", 0, 0)
+	results, _, err := s.Search(ctx, "some content", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -201,12 +201,92 @@ func TestStore_Search_TagOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, _, err := s.Search(ctx, "", "KUBE", 0, 0)
+	results, _, err := s.Search(ctx, "", []string{"KUBERNETES"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(results) != 1 {
-		t.Errorf("expected 1 result for tag filter, got %d", len(results))
+		t.Errorf("expected 1 result for a case-insensitive exact tag filter, got %d", len(results))
+	}
+}
+
+func TestStore_Search_TagFilter_ExactNotSubstring(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Entity note", "uses entity tagging", []string{"entity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "Identity note", "uses workload identity", []string{"workload-identity"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"entity"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Entity note" {
+		t.Errorf("expected tag_filter %q to match only the exact tag, not %q as a substring, got %+v", "entity", "workload-identity", results)
+	}
+}
+
+func TestStore_Search_TagFilter_MultipleTagsIsAND(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "Both tags", "has both", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "One tag", "has one", []string{"kubernetes"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := s.Search(ctx, "", []string{"kubernetes", "infra"}, 0, 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Both tags" {
+		t.Errorf("expected multiple tag_filter values to AND together, got %+v", results)
+	}
+}
+
+func TestStore_Tags_ReturnsSortedDistinctTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if _, err := s.Add(ctx, "A", "a", []string{"kubernetes", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add(ctx, "B", "b", []string{"golang", "infra"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	want := []string{"golang", "infra", "kubernetes"}
+	if len(tags) != len(want) {
+		t.Fatalf("expected %v, got %v", want, tags)
+	}
+	for i := range want {
+		if tags[i] != want[i] {
+			t.Errorf("expected %v, got %v", want, tags)
+			break
+		}
+	}
+}
+
+func TestStore_Tags_EmptyStore(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	tags, err := s.Tags(ctx)
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected no tags for an empty store, got %v", tags)
 	}
 }
 
@@ -221,7 +301,7 @@ func TestStore_Search_TagOnly_All(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, _, err := s.Search(ctx, "", "", 0, 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -240,7 +320,7 @@ func TestStore_Search_TagOnly_Limit(t *testing.T) {
 		}
 	}
 
-	results, _, err := s.Search(ctx, "", "", 3, 0)
+	results, _, err := s.Search(ctx, "", nil, 3, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -259,7 +339,7 @@ func TestStore_Search_TagOnly_OffsetAndTotal(t *testing.T) {
 		}
 	}
 
-	results, total, err := s.Search(ctx, "", "", 2, 3)
+	results, total, err := s.Search(ctx, "", nil, 2, 3)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -270,7 +350,7 @@ func TestStore_Search_TagOnly_OffsetAndTotal(t *testing.T) {
 		t.Errorf("expected 2 results after skipping 3 of 5, got %d", len(results))
 	}
 
-	results, total, err = s.Search(ctx, "", "", 0, 10)
+	results, total, err = s.Search(ctx, "", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -292,7 +372,7 @@ func TestStore_Search_Query_OffsetAndTotal(t *testing.T) {
 		}
 	}
 
-	all, total, err := s.Search(ctx, "widget", "", 0, 0)
+	all, total, err := s.Search(ctx, "widget", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -303,7 +383,7 @@ func TestStore_Search_Query_OffsetAndTotal(t *testing.T) {
 		t.Fatal("expected at least one match for 'widget'")
 	}
 
-	paged, pagedTotal, err := s.Search(ctx, "widget", "", 1, 1)
+	paged, pagedTotal, err := s.Search(ctx, "widget", nil, 1, 1)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -340,7 +420,7 @@ func TestStore_Search_TagOnly_OrdersByCreatedAtChronologically(t *testing.T) {
 	newer.CreatedAt = "2026-01-01T10:00:00.3Z"
 	bs.docs[idNew] = newer
 
-	results, _, err := s.Search(ctx, "", "", 0, 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -363,7 +443,7 @@ func TestStore_Search_QueryAndTagFilterCombined(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, _, err := s.Search(ctx, "cluster admin notes", "kubernetes", 0, 0)
+	results, _, err := s.Search(ctx, "cluster admin notes", []string{"kubernetes"}, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -527,7 +607,7 @@ func TestStore_Chunking_SearchFindsChunkedMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, _, err := s.Search(ctx, "word0 word1 word2", "", 0, 0)
+	results, _, err := s.Search(ctx, "word0 word1 word2", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -557,7 +637,7 @@ func TestStore_Chunking_SearchDeduplicates(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	results, _, err := s.Search(ctx, "word0", "", 0, 0)
+	results, _, err := s.Search(ctx, "word0", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -588,7 +668,7 @@ func TestStore_Chunking_Delete(t *testing.T) {
 		t.Error("expected error after deleting chunked memory, got nil")
 	}
 	// Verify chunks are gone from the vector store by confirming search returns nothing for this ID.
-	results, _, err := s.Search(ctx, "word0", "", 0, 0)
+	results, _, err := s.Search(ctx, "word0", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search after delete: %v", err)
 	}
@@ -686,7 +766,7 @@ func TestStore_Chunking_Update_ShortToLong(t *testing.T) {
 	}
 
 	// Verify it's searchable and deduplicated.
-	results, _, err := s.Search(ctx, "word0 word1", "", 0, 0)
+	results, _, err := s.Search(ctx, "word0 word1", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -711,7 +791,7 @@ func TestStore_Search_NoLimit(t *testing.T) {
 		}
 	}
 
-	results, _, err := s.Search(ctx, "memory item", "", 0, 0)
+	results, _, err := s.Search(ctx, "memory item", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search with no limit: %v", err)
 	}
@@ -730,7 +810,7 @@ func TestStore_Search_QueryLimit(t *testing.T) {
 		}
 	}
 
-	results, _, err := s.Search(ctx, "memory item", "", 3, 0)
+	results, _, err := s.Search(ctx, "memory item", nil, 3, 0)
 	if err != nil {
 		t.Fatalf("Search with limit: %v", err)
 	}
@@ -757,7 +837,7 @@ func TestStore_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	results, _, err := s.Search(ctx, "", "", 0, 0)
+	results, _, err := s.Search(ctx, "", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search after concurrent adds: %v", err)
 	}

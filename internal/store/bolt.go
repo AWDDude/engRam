@@ -325,8 +325,10 @@ func (s *boltStore) embedChunks(ctx context.Context, title, content string) ([][
 //
 // query == "" switches to a tag-only scan — callers outside the MCP layer
 // (export, reembed) may also pass both query and tagFilter empty to mean
-// "everything". limit <= 0 means unlimited; offset <= 0 means from the start.
-func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit, offset int) ([]SearchResult, int, error) {
+// "everything". tagFilter matches by exact, case-insensitive equality; a
+// memory must carry every listed tag (AND semantics). limit <= 0 means
+// unlimited; offset <= 0 means from the start.
+func (s *boltStore) Search(ctx context.Context, query string, tagFilter []string, limit, offset int) ([]SearchResult, int, error) {
 	if query == "" {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
@@ -374,14 +376,14 @@ func (s *boltStore) Search(ctx context.Context, query, tagFilter string, limit, 
 // cosine similarity ranks every document in the corpus, so without this the
 // dense leg would contribute a long tail of noise to the fusion.
 // Callers must hold s.mu.
-func (s *boltStore) denseScoresLocked(qv []float32, tagFilter string) map[string]float64 {
+func (s *boltStore) denseScoresLocked(qv []float32, tagFilter []string) map[string]float64 {
 	scores := make(map[string]float64, len(s.vecs))
 	for id, chunks := range s.vecs {
 		mem, ok := s.docs[id]
 		if !ok {
 			continue // orphaned vectors, skip
 		}
-		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
+		if !hasAllTags(mem.Tags, tagFilter) {
 			continue
 		}
 		var top float32 = -1
@@ -397,11 +399,11 @@ func (s *boltStore) denseScoresLocked(qv []float32, tagFilter string) map[string
 
 // sparseScoresLocked runs the BM25 query and applies the tag filter.
 // Callers must hold s.mu.
-func (s *boltStore) sparseScoresLocked(query, tagFilter string) map[string]float64 {
+func (s *boltStore) sparseScoresLocked(query string, tagFilter []string) map[string]float64 {
 	scores := s.bm25.score(query)
 	for id := range scores {
 		mem, ok := s.docs[id]
-		if !ok || (tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter)) {
+		if !ok || !hasAllTags(mem.Tags, tagFilter) {
 			delete(scores, id)
 		}
 	}
@@ -411,10 +413,10 @@ func (s *boltStore) sparseScoresLocked(query, tagFilter string) map[string]float
 // listLocked returns a page of matching memories newest-first, plus total,
 // the count of matches before offset/limit were applied. Callers must hold
 // s.mu.
-func (s *boltStore) listLocked(tagFilter string, limit, offset int) (page []Memory, total int) {
+func (s *boltStore) listLocked(tagFilter []string, limit, offset int) (page []Memory, total int) {
 	results := make([]Memory, 0, len(s.docs))
 	for _, mem := range s.docs {
-		if tagFilter != "" && !hasMatchingTag(mem.Tags, tagFilter) {
+		if !hasAllTags(mem.Tags, tagFilter) {
 			continue
 		}
 		results = append(results, mem)
@@ -449,6 +451,25 @@ func (s *boltStore) listLocked(tagFilter string, limit, offset int) (page []Memo
 		results = results[:limit]
 	}
 	return results, total
+}
+
+// Tags returns every distinct tag currently used across stored memories,
+// sorted, to aid tag_filter discoverability.
+func (s *boltStore) Tags(_ context.Context) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := make(map[string]bool)
+	for _, mem := range s.docs {
+		for _, tag := range mem.Tags {
+			seen[tag] = true
+		}
+	}
+	tags := make([]string, 0, len(seen))
+	for tag := range seen {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags, nil
 }
 
 func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {

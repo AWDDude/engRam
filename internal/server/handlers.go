@@ -66,10 +66,10 @@ type storeMemoryArgs struct {
 }
 
 type searchMemoryArgs struct {
-	Query     string `json:"query"`
-	TagFilter string `json:"tag_filter"`
-	Limit     *int   `json:"limit"`
-	Offset    int    `json:"offset"`
+	Query     string   `json:"query"`
+	TagFilter []string `json:"tag_filter"`
+	Limit     *int     `json:"limit"`
+	Offset    int      `json:"offset"`
 }
 
 // searchMemoryResponse wraps the result page with total, the count of
@@ -141,6 +141,22 @@ func (a *App) handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (
 	}
 
 	out, err := json.Marshal(searchMemoryResponse{Results: results, Total: total})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(out)), nil
+}
+
+func (a *App) handleListTags(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	tags, err := a.store.Tags(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("list_tags error: %v", err)), nil
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+
+	out, err := json.Marshal(tags)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
 	}

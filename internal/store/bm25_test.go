@@ -203,7 +203,7 @@ func TestSearch_ExactTokenBeatsDenseAlone(t *testing.T) {
 		}
 	}
 
-	results, _, err := s.Search(ctx, "withLock", "", 0, 0)
+	results, _, err := s.Search(ctx, "withLock", nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -220,8 +220,8 @@ func TestSearch_ExactTokenBeatsDenseAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	cs.mu.RLock()
-	denseRanked := rankedIDs(cs.denseScoresLocked(qv, ""))
-	sparseRanked := rankedIDs(cs.sparseScoresLocked("withLock", ""))
+	denseRanked := rankedIDs(cs.denseScoresLocked(qv, nil))
+	sparseRanked := rankedIDs(cs.sparseScoresLocked("withLock", nil))
 	cs.mu.RUnlock()
 
 	if len(sparseRanked) != 1 || sparseRanked[0] != target {

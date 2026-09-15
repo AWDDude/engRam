@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 	return id, nil
 }
 
-func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit, offset int) ([]store.SearchResult, int, error) {
+func (m *mockStore) Search(_ context.Context, query string, tagFilter []string, limit, offset int) ([]store.SearchResult, int, error) {
 	if m.searchErr != nil {
 		return nil, 0, m.searchErr
 	}
@@ -53,18 +54,8 @@ func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit, of
 		if query != "" && !strings.Contains(mem.Content, query) && !strings.Contains(mem.Title, query) {
 			continue
 		}
-		if tagFilter != "" {
-			// Case-insensitive, matching store.hasMatchingTag's production semantics.
-			tagMatched := false
-			for _, tag := range mem.Tags {
-				if strings.Contains(strings.ToLower(tag), strings.ToLower(tagFilter)) {
-					tagMatched = true
-					break
-				}
-			}
-			if !tagMatched {
-				continue
-			}
+		if !hasAllTagsForTest(mem.Tags, tagFilter) {
+			continue
 		}
 		matched = append(matched, store.SearchResult{ID: mem.ID, Title: mem.Title, Tags: mem.Tags})
 	}
@@ -80,6 +71,39 @@ func (m *mockStore) Search(_ context.Context, query, tagFilter string, limit, of
 		matched = matched[:limit]
 	}
 	return matched, total, nil
+}
+
+// hasAllTagsForTest mirrors store.hasAllTags's production semantics (exact,
+// case-insensitive, AND across multiple filters) without exporting it.
+func hasAllTagsForTest(tags, filters []string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	have := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		have[strings.ToLower(tag)] = true
+	}
+	for _, f := range filters {
+		if !have[strings.ToLower(f)] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *mockStore) Tags(_ context.Context) ([]string, error) {
+	seen := make(map[string]bool)
+	for _, mem := range m.memories {
+		for _, tag := range mem.Tags {
+			seen[tag] = true
+		}
+	}
+	tags := make([]string, 0, len(seen))
+	for tag := range seen {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	return tags, nil
 }
 
 func (m *mockStore) GetByID(_ context.Context, id string) (store.Memory, error) {
@@ -125,7 +149,7 @@ type captureSearchArgsStore struct {
 	onSearch func(limit int)
 }
 
-func (c *captureSearchArgsStore) Search(ctx context.Context, query, tagFilter string, limit, offset int) ([]store.SearchResult, int, error) {
+func (c *captureSearchArgsStore) Search(ctx context.Context, query string, tagFilter []string, limit, offset int) ([]store.SearchResult, int, error) {
 	c.onSearch(limit)
 	return c.mockStore.Search(ctx, query, tagFilter, limit, offset)
 }
@@ -355,7 +379,7 @@ func TestHandleSearchMemory_TagFilterOnly(t *testing.T) {
 	ms.memories["b"] = store.Memory{ID: "b", Title: "Go preference", Content: "go preference", Tags: []string{"golang"}}
 	app := newTestApp(ms)
 
-	req := makeRequest(map[string]any{"tag_filter": "kubernetes"})
+	req := makeRequest(map[string]any{"tag_filter": []any{"kubernetes"}})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -378,7 +402,7 @@ func TestHandleSearchMemory_TagFilterIsCaseInsensitive(t *testing.T) {
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Kubernetes fact", Content: "kubernetes fact", Tags: []string{"Kubernetes", "infra"}}
 	app := newTestApp(ms)
 
-	req := makeRequest(map[string]any{"tag_filter": "KUBERNETES"})
+	req := makeRequest(map[string]any{"tag_filter": []any{"KUBERNETES"}})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -427,7 +451,7 @@ func TestHandleSearchMemory_TagFilterOnly_StaleArgumentIgnored(t *testing.T) {
 	ms.memories["a"] = store.Memory{ID: "a", Title: "Tagged", Content: "content", Tags: []string{"x"}}
 	app := newTestApp(ms)
 
-	req := makeRequest(map[string]any{"tag_filter": "x", "min_score": 0.9})
+	req := makeRequest(map[string]any{"tag_filter": []any{"x"}, "min_score": 0.9})
 	result, err := app.handleSearchMemory(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -561,6 +585,106 @@ func TestHandleSearchMemory_StoreError(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Error("expected error result when store returns error")
+	}
+}
+
+func TestHandleSearchMemory_TagFilterMultipleTagsIsAND(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "Both tags", Content: "x", Tags: []string{"kubernetes", "infra"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "One tag", Content: "x", Tags: []string{"kubernetes"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"tag_filter": []any{"kubernetes", "infra"}})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ID != "a" {
+		t.Errorf("expected multiple tag_filter values to AND together, got %+v", resp.Results)
+	}
+}
+
+func TestHandleSearchMemory_TagFilterExactNotSubstring(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "Entity note", Content: "x", Tags: []string{"entity"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "Identity note", Content: "x", Tags: []string{"workload-identity"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"tag_filter": []any{"entity"}})
+	result, err := app.handleSearchMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var resp searchMemoryResponse
+	if err := json.Unmarshal([]byte(resultText(t, result)), &resp); err != nil {
+		t.Fatalf("parsing results: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ID != "a" {
+		t.Errorf("expected tag_filter to match exactly, not as a substring of workload-identity, got %+v", resp.Results)
+	}
+}
+
+// --- list_tags ---
+
+func TestHandleListTags_ReturnsSortedDistinctTags(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["a"] = store.Memory{ID: "a", Title: "A", Tags: []string{"kubernetes", "infra"}}
+	ms.memories["b"] = store.Memory{ID: "b", Title: "B", Tags: []string{"golang", "infra"}}
+	app := newTestApp(ms)
+
+	result, err := app.handleListTags(context.Background(), makeRequest(map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var tags []string
+	if err := json.Unmarshal([]byte(resultText(t, result)), &tags); err != nil {
+		t.Fatalf("parsing tags: %v", err)
+	}
+	want := []string{"golang", "infra", "kubernetes"}
+	if len(tags) != len(want) {
+		t.Fatalf("expected %v, got %v", want, tags)
+	}
+	for i := range want {
+		if tags[i] != want[i] {
+			t.Errorf("expected %v, got %v", want, tags)
+			break
+		}
+	}
+}
+
+func TestHandleListTags_EmptyStore(t *testing.T) {
+	app := newTestApp(newMockStore())
+
+	result, err := app.handleListTags(context.Background(), makeRequest(map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	var tags []string
+	if err := json.Unmarshal([]byte(resultText(t, result)), &tags); err != nil {
+		t.Fatalf("parsing tags: %v", err)
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected no tags for an empty store, got %v", tags)
 	}
 }
 

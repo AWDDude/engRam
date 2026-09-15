@@ -65,10 +65,17 @@ type Store interface {
 	// is the count after the relevance cutoff, for query == "" (a tag-only or
 	// unfiltered listing) it's the count of matching memories in the store.
 	// Callers use total to tell whether they've paged through everything.
-	Search(ctx context.Context, query, tagFilter string, limit, offset int) (results []SearchResult, total int, err error)
+	//
+	// tagFilter matches by exact, case-insensitive equality; a memory must
+	// carry every tag listed (AND semantics) to match. An empty tagFilter
+	// matches everything.
+	Search(ctx context.Context, query string, tagFilter []string, limit, offset int) (results []SearchResult, total int, err error)
 	GetByID(ctx context.Context, id string) (Memory, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id string, patch MemoryUpdate) error
+	// Tags returns every distinct tag currently used across stored memories,
+	// sorted, to aid tag_filter discoverability.
+	Tags(ctx context.Context) ([]string, error)
 }
 
 // rawAdder is the unvalidated write path: it stores a memory with an explicit
@@ -79,14 +86,22 @@ type rawAdder interface {
 	addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error
 }
 
-// hasMatchingTag reports whether any tag case-insensitively contains filter.
-func hasMatchingTag(tags []string, filter string) bool {
+// hasAllTags reports whether tags contains an exact, case-insensitive match
+// for every tag in filters. An empty filters matches everything.
+func hasAllTags(tags []string, filters []string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	have := make(map[string]bool, len(tags))
 	for _, tag := range tags {
-		if strings.Contains(strings.ToLower(tag), strings.ToLower(filter)) {
-			return true
+		have[strings.ToLower(tag)] = true
+	}
+	for _, f := range filters {
+		if !have[strings.ToLower(f)] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // chunkText splits text into overlapping word-based chunks. Returns a

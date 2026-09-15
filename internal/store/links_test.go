@@ -340,7 +340,7 @@ func TestLinks_UpdateContentAlso_TriggersReembed(t *testing.T) {
 	}
 
 	// Confirm it's actually searchable under the new content.
-	results, _, err := s.Search(ctx, "brand new content", "", 0, 0)
+	results, _, err := s.Search(ctx, "brand new content", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
