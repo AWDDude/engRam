@@ -504,6 +504,9 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 		normalized := normalizeTags(*patch.Tags)
 		patch.Tags = &normalized
 	}
+	patch.AddTags = normalizeTags(patch.AddTags)
+	patch.RemoveTags = normalizeTags(patch.RemoveTags)
+	tagsChanged := patch.Tags != nil || len(patch.AddTags) > 0 || len(patch.RemoveTags) > 0
 
 	// linked_ids, if patched, is handled first and entirely by syncLinks,
 	// which validates and persists atomically. Everything below re-reads the
@@ -519,7 +522,7 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	needsReembed := patch.Title != nil || patch.Content != nil
 
 	if !needsReembed {
-		if patch.Tags == nil {
+		if !tagsChanged {
 			if patch.LinkedIDs == nil {
 				// Nothing was patched at all; still report a not-found id.
 				_, err := s.GetByID(ctx, id)
@@ -533,7 +536,7 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 		if !ok {
 			return fmt.Errorf("memory %q not found", id)
 		}
-		current.Tags = *patch.Tags
+		current.Tags = applyTagPatch(current.Tags, patch)
 		// vectors omitted: a tags-only change must not re-embed.
 		return s.commit([]change{{mem: current}})
 	}
@@ -551,8 +554,8 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 		content = *patch.Content
 	}
 	tags := existing.Tags
-	if patch.Tags != nil {
-		tags = *patch.Tags
+	if tagsChanged {
+		tags = applyTagPatch(existing.Tags, patch)
 	}
 
 	vectors, err := s.embedChunks(ctx, title, content)
@@ -568,7 +571,7 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	}
 	current.Title = title
 	current.Content = content
-	if patch.Tags != nil {
+	if tagsChanged {
 		current.Tags = tags
 	}
 	return s.commit([]change{{mem: current, vectors: vectors}})

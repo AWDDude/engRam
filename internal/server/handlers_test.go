@@ -91,6 +91,19 @@ func hasAllTagsForTest(tags, filters []string) bool {
 	return true
 }
 
+func dedupeTagsForTest(tags []string) []string {
+	seen := make(map[string]bool, len(tags))
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
+}
+
 func (m *mockStore) Tags(_ context.Context) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, mem := range m.memories {
@@ -135,6 +148,22 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 	}
 	if patch.Tags != nil {
 		mem.Tags = *patch.Tags
+	}
+	if len(patch.AddTags) > 0 {
+		mem.Tags = dedupeTagsForTest(append(append([]string{}, mem.Tags...), patch.AddTags...))
+	}
+	if len(patch.RemoveTags) > 0 {
+		remove := make(map[string]bool, len(patch.RemoveTags))
+		for _, t := range patch.RemoveTags {
+			remove[t] = true
+		}
+		kept := mem.Tags[:0:0]
+		for _, t := range mem.Tags {
+			if !remove[t] {
+				kept = append(kept, t)
+			}
+		}
+		mem.Tags = kept
 	}
 	if patch.LinkedIDs != nil {
 		mem.LinkedIDs = *patch.LinkedIDs
@@ -970,6 +999,127 @@ func TestHandleUpdateMemory_TagsOnlyPatch(t *testing.T) {
 	}
 	if len(ms.memories["upd-id"].Tags) != 1 || ms.memories["upd-id"].Tags[0] != "new" {
 		t.Errorf("expected tags replaced, got %v", ms.memories["upd-id"].Tags)
+	}
+}
+
+func TestHandleUpdateMemory_AddTags(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"kept"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "add_tags": []any{"new"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["upd-id"].Tags
+	if len(got) != 2 || got[0] != "kept" || got[1] != "new" {
+		t.Errorf("expected add_tags to union with the existing set, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_RemoveTags(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"keep", "drop"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "remove_tags": []any{"drop"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["upd-id"].Tags
+	if len(got) != 1 || got[0] != "keep" {
+		t.Errorf("expected remove_tags to drop only the listed tag, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_AddAndRemoveTagsTogether(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "add_tags": []any{"new"}, "remove_tags": []any{"old"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["upd-id"].Tags
+	if len(got) != 1 || got[0] != "new" {
+		t.Errorf("expected add_tags and remove_tags combined to swap the tag, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_AddTagsAlreadyPresentIsNoop(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"existing"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "add_tags": []any{"existing"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+	got := ms.memories["upd-id"].Tags
+	if len(got) != 1 || got[0] != "existing" {
+		t.Errorf("expected adding an already-present tag to be a no-op, got %v", got)
+	}
+}
+
+func TestHandleUpdateMemory_TagsRejectsCombinationWithAddTags(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "tags": []any{"new"}, "add_tags": []any{"extra"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected combining tags with add_tags to be rejected")
+	}
+}
+
+func TestHandleUpdateMemory_TagsRejectsCombinationWithRemoveTags(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content", Tags: []string{"old"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "tags": []any{"new"}, "remove_tags": []any{"old"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected combining tags with remove_tags to be rejected")
+	}
+}
+
+func TestHandleUpdateMemory_AddTagsAloneSatisfiesAtLeastOneField(t *testing.T) {
+	ms := newMockStore()
+	ms.memories["upd-id"] = store.Memory{ID: "upd-id", Title: "Title", Content: "content"}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{"memory_id": "upd-id", "add_tags": []any{"new"}})
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected add_tags alone to satisfy the at-least-one-field requirement, got error: %v", result.Content)
 	}
 }
 

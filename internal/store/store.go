@@ -50,11 +50,22 @@ type RetrieveResult struct {
 // MemoryUpdate is a patch: nil fields are left untouched, non-nil fields are
 // applied as given (including an explicit empty slice, which clears tags or
 // linked_ids).
+//
+// Tags is a full replacement; AddTags/RemoveTags are an incremental
+// alternative that leaves tags not mentioned untouched. Callers should treat
+// them as mutually exclusive with Tags (the MCP handler rejects combining
+// them); if both somehow arrive together, Tags is applied first and
+// AddTags/RemoveTags apply on top of it. AddTags and RemoveTags are plain
+// slices, not pointers: nil and empty both mean "no change," since there's
+// no meaningful "clear via add/remove" the way an explicit empty Tags means
+// "clear all tags." A tag in both AddTags and RemoveTags ends up removed.
 type MemoryUpdate struct {
-	Title     *string
-	Content   *string
-	Tags      *[]string
-	LinkedIDs *[]string
+	Title      *string
+	Content    *string
+	Tags       *[]string
+	AddTags    []string
+	RemoveTags []string
+	LinkedIDs  *[]string
 }
 
 // Store is the persistence interface for memories.
@@ -146,6 +157,52 @@ func normalizeTags(tags []string) []string {
 	out := make([]string, len(tags))
 	for i, t := range tags {
 		out[i] = strings.ToLower(t)
+	}
+	return out
+}
+
+// applyTagPatch resolves a MemoryUpdate's tag fields against currentTags, in
+// a fixed order: patch.Tags (if given) replaces the set outright, then
+// patch.AddTags unions in, then patch.RemoveTags subtracts — so a tag listed
+// in both AddTags and RemoveTags ends up removed. patch.Tags/AddTags/
+// RemoveTags are assumed already normalized by the caller (Update does this
+// once at entry); currentTags is normalized here since it may still carry
+// legacy mixed-case tags read straight from storage rather than through a
+// path that normalizes on read.
+func applyTagPatch(currentTags []string, patch MemoryUpdate) []string {
+	tags := normalizeTags(currentTags)
+	if patch.Tags != nil {
+		tags = *patch.Tags
+	}
+	if len(patch.AddTags) > 0 {
+		merged := make([]string, 0, len(tags)+len(patch.AddTags))
+		merged = append(merged, tags...)
+		merged = append(merged, patch.AddTags...)
+		tags = dedupeStrings(merged)
+	}
+	if len(patch.RemoveTags) > 0 {
+		remove := toSet(patch.RemoveTags)
+		out := tags[:0:0]
+		for _, tag := range tags {
+			if !remove[tag] {
+				out = append(out, tag)
+			}
+		}
+		tags = out
+	}
+	return tags
+}
+
+// dedupeStrings removes duplicate values, preserving first-seen order.
+func dedupeStrings(items []string) []string {
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
 	}
 	return out
 }

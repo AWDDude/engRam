@@ -942,6 +942,148 @@ func TestStore_Update_TagsOnly(t *testing.T) {
 	}
 }
 
+func TestStore_Update_AddTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"kept"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"New"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kept", "new"}
+	if len(mem.Tags) != len(want) || mem.Tags[0] != want[0] || mem.Tags[1] != want[1] {
+		t.Errorf("expected add_tags to union with the existing set (normalized to lowercase), got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_RemoveTags(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"keep", "drop"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{RemoveTags: []string{"DROP"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "keep" {
+		t.Errorf("expected remove_tags to drop only the listed tag (case-insensitively), got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddAndRemoveTagsTogether(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"old"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"new"}, RemoveTags: []string{"old"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "new" {
+		t.Errorf("expected add_tags and remove_tags combined to swap the tag, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddTagsSameAsRemoveTagsEndsUpRemoved(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"existing"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"contested"}, RemoveTags: []string{"contested"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mem.Tags) != 1 || mem.Tags[0] != "existing" {
+		t.Errorf("expected a tag listed in both add_tags and remove_tags to end up removed, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddTagsWithContentAlsoTriggersReembed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "old content", []string{"kept"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newContent := "new content"
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent, AddTags: []string{"new"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	mem, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.Content != "new content" {
+		t.Errorf("expected content updated, got %q", mem.Content)
+	}
+	want := []string{"kept", "new"}
+	if len(mem.Tags) != len(want) || mem.Tags[0] != want[0] || mem.Tags[1] != want[1] {
+		t.Errorf("expected add_tags applied alongside a reembedding update, got %v", mem.Tags)
+	}
+}
+
+func TestStore_Update_AddRemoveTags_NormalizesLegacyMixedCaseBase(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs := s.(*boltStore)
+	mem := bs.docs[id]
+	mem.Tags = []string{"Kubernetes"}
+	bs.docs[id] = mem
+
+	if err := s.Update(ctx, id, MemoryUpdate{AddTags: []string{"kubernetes"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "kubernetes" {
+		t.Errorf("expected add_tags of an already-present (but differently-cased) legacy tag not to duplicate it, got %v", got.Tags)
+	}
+}
+
 func TestStore_Update_NotFound(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
