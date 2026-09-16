@@ -7,11 +7,16 @@ import (
 	"testing"
 )
 
-func TestVersionIsSemver(t *testing.T) {
-	// A release build overrides this via ldflags, but the constant is what
-	// source builds report — an empty or malformed value would ship silently.
+func TestVersionIsSemverOrDev(t *testing.T) {
+	// A release build overrides this via ldflags, but go test does neither,
+	// so plain `go test`/`make test` see the "dev" fallback — that's expected,
+	// not a bug. Anything else should still look like a semver string, so an
+	// empty or malformed value doesn't ship silently.
+	if version == "dev" {
+		return
+	}
 	if !regexp.MustCompile(`^\d+\.\d+\.\d+`).MatchString(version) {
-		t.Errorf("version = %q, want a semver-looking string", version)
+		t.Errorf("version = %q, want the \"dev\" fallback or a semver-looking string", version)
 	}
 }
 
