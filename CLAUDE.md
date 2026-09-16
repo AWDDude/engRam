@@ -23,9 +23,10 @@ make clean    # remove binary
 (also `--version`/`-v`), `help` (also `--help`/`-h`), `export -f`, `import -f`,
 `reembed`. An unrecognised flag exits 2 instead of silently starting the server.
 
-Version lives in `cmd/engram/version.go` as a `var` that goreleaser overrides
-via `-X main.version={{ .Version }}`, so published binaries report their tag
-and source builds report the next intended release.
+Version lives in `cmd/engram/version.go` as a `var`, overridden via `-X
+main.version=...` ldflags: goreleaser passes the pushed tag for published
+binaries, and `make build` passes the short git commit for local builds. A
+bare `go build ./cmd/engram/` reports the fallback `"dev"`.
 
 ## Releasing
 

@@ -6,13 +6,12 @@ import (
 	"runtime"
 )
 
-// version is the engram release version.
-//
-// Release builds override it via goreleaser's ldflags (-X main.version=<tag>),
-// so the tag is authoritative for anything published. The constant here is
-// what a local `go build` or `make build` reports, and should name the next
-// intended release.
-var version = "2.1.0"
+// version is the engram release version, overridden via -X main.version=...
+// ldflags: goreleaser passes the pushed tag for published binaries, and
+// `make build` passes the short git commit for local builds. A bare
+// `go build ./cmd/engram/` with neither skips the override and reports this
+// fallback.
+var version = "dev"
 
 // commands lists every subcommand main dispatches on, so the usage text and
 // the dispatch table can be checked against each other.

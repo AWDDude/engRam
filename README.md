@@ -248,10 +248,9 @@ If you tag the wrong commit, delete the tag before retagging:
 git push --delete origin v2.0.0
 ```
 
-The version reported by `engram version` comes from the tag: GoReleaser
-injects it with `-X main.version={{ .Version }}`. The constant in
-`cmd/engram/version.go` is only what local source builds report, and should
-name the next intended release.
+The version reported by `engram version` comes from `-X main.version=...`
+ldflags: GoReleaser injects the pushed tag for published binaries, and
+`make build` injects the short git commit for local builds.
 
 ## License
 
