@@ -197,7 +197,7 @@ func (a *App) handleRetrieveMemory(ctx context.Context, req mcp.CallToolRequest)
 			// shouldn't make retrieve unusable — skip it rather than error.
 			continue
 		}
-		linked = append(linked, store.SearchResult{ID: linkedMem.ID, Title: linkedMem.Title, Tags: linkedMem.Tags})
+		linked = append(linked, store.SearchResult{ID: linkedMem.ID, Title: linkedMem.Title, Tags: linkedMem.Tags, CreatedAt: linkedMem.CreatedAt, UpdatedAt: linkedMem.UpdatedAt})
 	}
 
 	result := store.RetrieveResult{
@@ -206,6 +206,7 @@ func (a *App) handleRetrieveMemory(ctx context.Context, req mcp.CallToolRequest)
 		Content:   mem.Content,
 		Tags:      mem.Tags,
 		CreatedAt: mem.CreatedAt,
+		UpdatedAt: mem.UpdatedAt,
 		Linked:    linked,
 	}
 	out, err := json.Marshal(result)

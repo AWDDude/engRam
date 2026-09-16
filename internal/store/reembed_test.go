@@ -164,6 +164,9 @@ func TestReembedWithEmb_PreservesMetadata(t *testing.T) {
 	if migrated.CreatedAt != original.CreatedAt {
 		t.Errorf("created_at mismatch: got %q, want %q", migrated.CreatedAt, original.CreatedAt)
 	}
+	if migrated.UpdatedAt != original.UpdatedAt {
+		t.Errorf("updated_at mismatch: got %q, want %q", migrated.UpdatedAt, original.UpdatedAt)
+	}
 	if len(migrated.Tags) != len(original.Tags) {
 		t.Errorf("tags mismatch: got %v, want %v", migrated.Tags, original.Tags)
 	}

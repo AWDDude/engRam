@@ -204,6 +204,9 @@ func TestLinks_UpdateAddLink(t *testing.T) {
 	if !containsID(b.LinkedIDs, aID) {
 		t.Errorf("expected B linked back to A, got %v", b.LinkedIDs)
 	}
+	if b.UpdatedAt == "" || b.UpdatedAt == b.CreatedAt {
+		t.Errorf("expected B's UpdatedAt to be bumped by A's link, got %q (created %q)", b.UpdatedAt, b.CreatedAt)
+	}
 }
 
 func TestLinks_UpdateRemoveLink(t *testing.T) {

@@ -26,14 +26,22 @@ type Memory struct {
 	Tags      []string `json:"tags"`
 	LinkedIDs []string `json:"linked_ids"`
 	CreatedAt string   `json:"created_at"`
+	// UpdatedAt is set equal to CreatedAt on Add and refreshed on every Update
+	// (including tag- and link-only patches, since those change the record's
+	// stored fields too). Memories written before this field existed come
+	// back with UpdatedAt defaulted to CreatedAt (see backfillUpdatedAt)
+	// rather than empty, so old and new records compare the same way.
+	UpdatedAt string `json:"updated_at"`
 }
 
 // SearchResult is the lightweight projection returned by Search, and reused
 // for the linked-memory summaries embedded in RetrieveResult.
 type SearchResult struct {
-	ID    string   `json:"id"`
-	Title string   `json:"title"`
-	Tags  []string `json:"tags"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Tags      []string `json:"tags"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 // RetrieveResult is the full-detail response for the retrieve tool: the
@@ -44,6 +52,7 @@ type RetrieveResult struct {
 	Content   string         `json:"content"`
 	Tags      []string       `json:"tags"`
 	CreatedAt string         `json:"created_at"`
+	UpdatedAt string         `json:"updated_at"`
 	Linked    []SearchResult `json:"linked"`
 }
 
@@ -100,7 +109,7 @@ type Store interface {
 // and Update enforce. CSV import and Reembed restore already-consistent data
 // and deliberately need this; nothing else should use it.
 type rawAdder interface {
-	addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error
+	addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt, updatedAt string) error
 }
 
 // hasAllTags reports whether tags contains an exact, case-insensitive match
@@ -151,9 +160,21 @@ func chunkText(text string) []string {
 func toSearchResults(mems []Memory) []SearchResult {
 	out := make([]SearchResult, 0, len(mems))
 	for _, mem := range mems {
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags), CreatedAt: mem.CreatedAt, UpdatedAt: mem.UpdatedAt})
 	}
 	return out
+}
+
+// backfillUpdatedAt defaults an empty UpdatedAt to CreatedAt, for memories
+// written before updated_at existed. Applied at load time, the same way
+// normalizeTags self-heals legacy mixed-case tags on read, and again on raw
+// adds, whose timestamps come from a caller-supplied source (a legacy CSV
+// export) rather than from the store.
+func backfillUpdatedAt(mem Memory) Memory {
+	if mem.UpdatedAt == "" {
+		mem.UpdatedAt = mem.CreatedAt
+	}
+	return mem
 }
 
 // normalizeTags lowercases every tag so two memories can't drift into

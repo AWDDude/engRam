@@ -2,11 +2,15 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/AWDDude/engRam/internal/config"
 )
@@ -55,6 +59,54 @@ func newTestStoreWithEmb(t *testing.T, embed EmbeddingFunc) Store {
 	return s
 }
 
+// TestStore_Load_BackfillsMissingUpdatedAt proves the self-healing half of
+// the updated_at rollout: a record written before the field existed still
+// comes back with UpdatedAt defaulted to CreatedAt on load, without a data
+// migration, the same way normalizeTags self-heals legacy mixed-case tags.
+func TestStore_Load_BackfillsMissingUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := testNewStoreWithModel(t, dir, "test-model")
+
+	id, err := s.Add(ctx, "Legacy", "legacy content", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Strip updated_at directly in the bolt file, bypassing the store's own
+	// write path, to simulate a record written before the field existed.
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		mb := tx.Bucket(bucketMemories)
+		var fields map[string]any
+		if err := json.Unmarshal(mb.Get([]byte(id)), &fields); err != nil {
+			return err
+		}
+		delete(fields, "updated_at")
+		data, err := json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		return mb.Put([]byte(id), data)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := testNewStoreWithModel(t, dir, "test-model")
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	mem, err := reopened.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.UpdatedAt != mem.CreatedAt {
+		t.Errorf("expected legacy record's UpdatedAt backfilled to CreatedAt, got %q vs %q", mem.UpdatedAt, mem.CreatedAt)
+	}
+}
+
 func TestStore_Add(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -92,6 +144,9 @@ func TestStore_AddAndGetByID(t *testing.T) {
 	}
 	if mem.CreatedAt == "" {
 		t.Error("expected non-empty CreatedAt")
+	}
+	if mem.UpdatedAt != mem.CreatedAt {
+		t.Errorf("expected UpdatedAt to equal CreatedAt on a fresh memory, got %q vs %q", mem.UpdatedAt, mem.CreatedAt)
 	}
 	if len(mem.LinkedIDs) != 0 {
 		t.Errorf("expected no linked IDs, got %v", mem.LinkedIDs)
@@ -920,6 +975,40 @@ func TestStore_Update_TitleOnly(t *testing.T) {
 	}
 	if mem.Content != "original content" {
 		t.Errorf("content should be preserved, got %q", mem.Content)
+	}
+}
+
+func TestStore_Update_RefreshesUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id, err := s.Add(ctx, "Title", "content", []string{"tag1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force a distinct timestamp: RFC3339Nano has nanosecond resolution, but
+	// a fast test run can otherwise land Add and Update in the same tick.
+	time.Sleep(time.Millisecond)
+
+	newContent := "updated content"
+	if err := s.Update(ctx, id, MemoryUpdate{Content: &newContent}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	after, err := s.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.CreatedAt != before.CreatedAt {
+		t.Errorf("expected CreatedAt to stay fixed, got %q, want %q", after.CreatedAt, before.CreatedAt)
+	}
+	if after.UpdatedAt == before.UpdatedAt {
+		t.Errorf("expected UpdatedAt to change after Update, still %q", after.UpdatedAt)
 	}
 }
 

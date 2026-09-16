@@ -11,11 +11,16 @@ import (
 )
 
 // csvHeader is the column order used by Export and validated by Import.
-var csvHeader = []string{"id", "title", "content", "tags", "linked_ids", "created_at"}
+var csvHeader = []string{"id", "title", "content", "tags", "linked_ids", "created_at", "updated_at"}
+
+// legacyCSVHeader is the column order Export used before updated_at existed.
+// Import still accepts it so a backup taken by an older engram can be
+// restored; the absent updated_at defaults to created_at on the way in.
+var legacyCSVHeader = csvHeader[:len(csvHeader)-1]
 
 // Export writes all memories to w as CSV (columns: id, title, content, tags,
-// linked_ids, created_at; tags and linked_ids are joined with ";"). Returns
-// the number of memories exported.
+// linked_ids, created_at, updated_at; tags and linked_ids are joined with
+// ";"). Returns the number of memories exported.
 func Export(ctx context.Context, cfg config.Config, w io.Writer) (int, error) {
 	st, cleanup, err := NewBoltStore(cfg)
 	if err != nil {
@@ -44,7 +49,7 @@ func exportStore(ctx context.Context, st Store, w io.Writer) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("retrieving memory %s: %w", r.ID, err)
 		}
-		record := []string{mem.ID, mem.Title, mem.Content, strings.Join(mem.Tags, ";"), strings.Join(mem.LinkedIDs, ";"), mem.CreatedAt}
+		record := []string{mem.ID, mem.Title, mem.Content, strings.Join(mem.Tags, ";"), strings.Join(mem.LinkedIDs, ";"), mem.CreatedAt, mem.UpdatedAt}
 		if err := cw.Write(record); err != nil {
 			return 0, fmt.Errorf("writing memory %s: %w", mem.ID, err)
 		}

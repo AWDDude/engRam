@@ -68,7 +68,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("search",
-			mcp.WithDescription("Search stored memories by hybrid semantic + keyword query and/or tag filter. Omitting both query and tag_filter lists every memory, newest first, with no relevance filtering — use this to enumerate the store (audits, dedup checks, verifying a bulk operation touched everything). Results are ranked by relevance when a query is given. Returns id, title, and tags for each match plus a total count — use retrieve for full details."),
+			mcp.WithDescription("Search stored memories by hybrid semantic + keyword query and/or tag filter. Omitting both query and tag_filter lists every memory, newest first, with no relevance filtering — use this to enumerate the store (audits, dedup checks, verifying a bulk operation touched everything). Results are ranked by relevance when a query is given. Returns id, title, tags, created_at, and updated_at for each match plus a total count — use retrieve for full details."),
 			mcp.WithString("query",
 				mcp.Description("Search query (matches title and content, both semantically and by keyword). Omit along with tag_filter to list everything."),
 			),
@@ -95,7 +95,7 @@ func RegisterTools(s *mcpserver.MCPServer, app *App) {
 
 	s.AddTool(
 		mcp.NewTool("retrieve",
-			mcp.WithDescription("Retrieve full details of a memory by ID, including titles and tags of any linked memories"),
+			mcp.WithDescription("Retrieve full details of a memory by ID, including created_at and updated_at, and the id, title, tags, created_at and updated_at of any linked memories"),
 			mcp.WithString("memory_id",
 				mcp.Required(),
 				mcp.Description("The ID of the memory to retrieve"),

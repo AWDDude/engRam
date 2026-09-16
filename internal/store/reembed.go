@@ -76,7 +76,7 @@ func reembedWithEmb(ctx context.Context, cfg config.Config, embFn EmbeddingFunc,
 	defer func() { _ = newStore.db.Close() }()
 
 	for i, mem := range memories {
-		if err := newStore.addMemory(ctx, mem.ID, mem.Title, mem.Content, mem.Tags, mem.LinkedIDs, mem.CreatedAt); err != nil {
+		if err := newStore.addMemory(ctx, mem.ID, mem.Title, mem.Content, mem.Tags, mem.LinkedIDs, mem.CreatedAt, mem.UpdatedAt); err != nil {
 			return i, fmt.Errorf("re-embedding memory %s: %w", mem.ID, err)
 		}
 		fmt.Fprintf(w, "  [%d/%d] re-embedded %s\n", i+1, len(memories), mem.ID)
@@ -114,7 +114,7 @@ func readAllMemories(path string) ([]Memory, error) {
 			if err := json.Unmarshal(v, &mem); err != nil {
 				return fmt.Errorf("parsing memory %s: %w", k, err)
 			}
-			memories = append(memories, mem)
+			memories = append(memories, backfillUpdatedAt(mem))
 			return nil
 		})
 	})

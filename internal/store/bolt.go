@@ -150,6 +150,7 @@ func (s *boltStore) load() error {
 			if err := json.Unmarshal(v, &mem); err != nil {
 				return fmt.Errorf("parsing memory %s: %w", k, err)
 			}
+			mem = backfillUpdatedAt(mem)
 			s.docs[mem.ID] = mem
 			s.bm25.set(mem.ID, mem.Title, mem.Content, mem.Tags)
 			return nil
@@ -254,10 +255,16 @@ func (s *boltStore) commit(changes []change) error {
 	return nil
 }
 
+// nowRFC3339 returns the current time as RFC3339Nano, the format Memory
+// stores CreatedAt/UpdatedAt in.
+func nowRFC3339() string {
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
 func (s *boltStore) Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error) {
 	id := uuid.NewString()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := s.addMemory(ctx, id, title, content, normalizeTags(tags), nil, now); err != nil {
+	now := nowRFC3339()
+	if err := s.addMemory(ctx, id, title, content, normalizeTags(tags), nil, now, now); err != nil {
 		return "", err
 	}
 	if len(linkedIDs) > 0 {
@@ -282,7 +289,7 @@ func (s *boltStore) Add(ctx context.Context, title, content string, tags, linked
 // callers that need the link invariant enforced (Add, Update) go through
 // syncLinks separately; CSV import and Reembed intentionally bypass it and
 // restore linkedIDs as-is (see import.go).
-func (s *boltStore) addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt string) error {
+func (s *boltStore) addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt, updatedAt string) error {
 	// Embedding is slow and needs no lock; do it before taking one.
 	vectors, err := s.embedChunks(ctx, title, content)
 	if err != nil {
@@ -290,17 +297,21 @@ func (s *boltStore) addMemory(ctx context.Context, id, title, content string, ta
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commit([]change{{
-		mem: Memory{
-			ID:        id,
-			Title:     title,
-			Content:   content,
-			Tags:      tags,
-			LinkedIDs: linkedIDs,
-			CreatedAt: createdAt,
-		},
-		vectors: vectors,
-	}})
+	// backfillUpdatedAt on the way in, not just at load: a raw add carries
+	// whatever timestamps its source had, and a legacy CSV row has none. The
+	// in-memory docs map serves reads directly, so defaulting here is what
+	// keeps an imported legacy record reading the same before and after the
+	// next reopen.
+	mem := backfillUpdatedAt(Memory{
+		ID:        id,
+		Title:     title,
+		Content:   content,
+		Tags:      tags,
+		LinkedIDs: linkedIDs,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+	})
+	return s.commit([]change{{mem: mem, vectors: vectors}})
 }
 
 // embedChunks splits "title\n\ncontent" into chunks that fit the model's token
@@ -366,7 +377,7 @@ func (s *boltStore) Search(ctx context.Context, query string, tagFilter []string
 	out := make([]SearchResult, 0, len(ranked))
 	for _, id := range ranked {
 		mem := s.docs[id]
-		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags)})
+		out = append(out, SearchResult{ID: mem.ID, Title: mem.Title, Tags: normalizeTags(mem.Tags), CreatedAt: mem.CreatedAt, UpdatedAt: mem.UpdatedAt})
 	}
 	return out, total, nil
 }
@@ -494,7 +505,7 @@ func (s *boltStore) Delete(_ context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("memory %q not found", id)
 	}
-	changes := s.unlinkPeerChanges(id, target.LinkedIDs, nil)
+	changes := s.unlinkPeerChanges(id, target.LinkedIDs, nil, nowRFC3339())
 	changes = append(changes, change{mem: target, remove: true})
 	return s.commit(changes)
 }
@@ -569,6 +580,7 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 		// another Update committed while this one was embedding.
 		current.Tags = applyTagPatch(current.Tags, patch)
 	}
+	current.UpdatedAt = nowRFC3339()
 	if !needsReembed {
 		// vectors omitted: a tags-only change must not re-embed.
 		return s.commit([]change{{mem: current}})
@@ -611,6 +623,7 @@ func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 
 	oldSet := toSet(target.LinkedIDs)
 	newSet := toSet(normalized)
+	now := nowRFC3339()
 
 	var changes []change
 	for _, peerID := range normalized {
@@ -622,12 +635,14 @@ func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 			// Copy rather than append in place: the slice header in s.docs
 			// may share a backing array we must not mutate before commit.
 			peer.LinkedIDs = append(append([]string{}, peer.LinkedIDs...), id)
+			peer.UpdatedAt = now
 			changes = append(changes, change{mem: peer})
 		}
 	}
-	changes = append(changes, s.unlinkPeerChanges(id, target.LinkedIDs, newSet)...)
+	changes = append(changes, s.unlinkPeerChanges(id, target.LinkedIDs, newSet, now)...)
 
 	target.LinkedIDs = normalized
+	target.UpdatedAt = now
 	changes = append(changes, change{mem: target})
 
 	if err := s.commit(changes); err != nil {
@@ -637,10 +652,11 @@ func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 }
 
 // unlinkPeerChanges builds the changes that remove id from each peer's
-// LinkedIDs, skipping any peer present in keep (nil keep skips none). Shared
-// by syncLinks (which keeps peers still in the new link set) and Delete (which
-// keeps none). Callers must hold s.mu.
-func (s *boltStore) unlinkPeerChanges(id string, peerIDs []string, keep map[string]bool) []change {
+// LinkedIDs, skipping any peer present in keep (nil keep skips none), and
+// stamps each changed peer's UpdatedAt with now. Shared by syncLinks (which
+// keeps peers still in the new link set) and Delete (which keeps none).
+// Callers must hold s.mu.
+func (s *boltStore) unlinkPeerChanges(id string, peerIDs []string, keep map[string]bool, now string) []change {
 	var changes []change
 	for _, peerID := range peerIDs {
 		if keep[peerID] {
@@ -651,6 +667,7 @@ func (s *boltStore) unlinkPeerChanges(id string, peerIDs []string, keep map[stri
 			continue // peer already gone, nothing to clean up
 		}
 		peer.LinkedIDs = removeString(peer.LinkedIDs, id)
+		peer.UpdatedAt = now
 		changes = append(changes, change{mem: peer})
 	}
 	return changes

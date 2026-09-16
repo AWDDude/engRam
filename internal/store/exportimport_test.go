@@ -29,7 +29,7 @@ func TestExportStore_WritesAllMemories(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "id,title,content,tags,linked_ids,created_at") {
+	if !strings.Contains(out, "id,title,content,tags,linked_ids,created_at,updated_at") {
 		t.Errorf("expected csv header, got: %s", out)
 	}
 	if !strings.Contains(out, id1) || !strings.Contains(out, "tag1;tag2") {
@@ -93,6 +93,9 @@ func TestExportImportStore_RoundTrip(t *testing.T) {
 	if imported.CreatedAt != original.CreatedAt {
 		t.Errorf("created_at mismatch: got %q, want %q", imported.CreatedAt, original.CreatedAt)
 	}
+	if imported.UpdatedAt != original.UpdatedAt {
+		t.Errorf("updated_at mismatch: got %q, want %q", imported.UpdatedAt, original.UpdatedAt)
+	}
 	if len(imported.Tags) != len(original.Tags) {
 		t.Errorf("tags mismatch: got %v, want %v", imported.Tags, original.Tags)
 	}
@@ -144,9 +147,9 @@ func TestImportStore_ForwardReferencedLinkDoesNotError(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	csv := "id,title,content,tags,linked_ids,created_at\n" +
-		"id-1,First,first content,,id-2,2024-01-01T00:00:00Z\n" +
-		"id-2,Second,second content,,id-1,2024-01-01T00:00:00Z\n"
+	csv := "id,title,content,tags,linked_ids,created_at,updated_at\n" +
+		"id-1,First,first content,,id-2,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z\n" +
+		"id-2,Second,second content,,id-1,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z\n"
 
 	n, err := importStore(ctx, s, strings.NewReader(csv))
 	if err != nil {
@@ -165,11 +168,41 @@ func TestImportStore_ForwardReferencedLinkDoesNotError(t *testing.T) {
 	}
 }
 
+// TestImportStore_LegacyHeaderDefaultsUpdatedAt covers a backup taken before
+// updated_at existed: the six-column form still imports, and the missing
+// updated_at reads back as created_at without waiting for a reopen.
+func TestImportStore_LegacyHeaderDefaultsUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	csv := "id,title,content,tags,linked_ids,created_at\n" +
+		"id-1,Legacy,legacy content,tag1,,2024-01-01T00:00:00Z\n"
+
+	n, err := importStore(ctx, s, strings.NewReader(csv))
+	if err != nil {
+		t.Fatalf("importStore: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 imported, got %d", n)
+	}
+
+	mem, err := s.GetByID(ctx, "id-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.CreatedAt != "2024-01-01T00:00:00Z" {
+		t.Errorf("created_at mismatch: got %q", mem.CreatedAt)
+	}
+	if mem.UpdatedAt != mem.CreatedAt {
+		t.Errorf("expected updated_at defaulted to created_at, got %q vs %q", mem.UpdatedAt, mem.CreatedAt)
+	}
+}
+
 func TestImportStore_BlankIDGeneratesNewOne(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	csv := "id,title,content,tags,linked_ids,created_at\n,Blank ID,blank id content,,,2024-01-01T00:00:00Z\n"
+	csv := "id,title,content,tags,linked_ids,created_at,updated_at\n,Blank ID,blank id content,,,2024-01-01T00:00:00Z,2024-01-01T00:00:00Z\n"
 	n, err := importStore(ctx, s, strings.NewReader(csv))
 	if err != nil {
 		t.Fatalf("importStore: %v", err)
