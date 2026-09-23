@@ -7,7 +7,8 @@ MCP server for long-term semantic memory. Single statically-linked Go binary.
 - **Storage**: bbolt (embedded, single file, ACID transactions) — records, vectors, and links in one database
 - **Retrieval**: hybrid — brute-force cosine over stored vectors + in-memory BM25, fused by Reciprocal Rank Fusion
 - **Embeddings**: hugot + GoMLX simplego backend (`jinaai/jina-embeddings-v2-small-en`, 512-dim, 8192-token window, downloaded once from Hugging Face, no external service)
-- **MCP transport**: stdio (mark3labs/mcp-go v0.50.0)
+- **MCP transport**: stdio (mark3labs/mcp-go), proxied to a shared daemon over a unix socket
+- **Concurrency**: many client processes, one daemon that owns the database
 
 ## Commands
 
@@ -19,9 +20,12 @@ make clean    # remove binary
 
 ## CLI
 
-`engram` with no args starts the MCP server on stdio. Subcommands: `version`
-(also `--version`/`-v`), `help` (also `--help`/`-h`), `export -f`, `import -f`,
-`reembed`. An unrecognised flag exits 2 instead of silently starting the server.
+`engram` with no args connects to the daemon and pipes MCP over stdio.
+Subcommands: `version` (also `--version`/`-v`), `help` (also `--help`/`-h`),
+`export -f`, `import -f`, `reembed`, `daemon` (plus `daemon status` and
+`daemon stop`). An unrecognised flag exits 2 instead of silently starting the
+server. `commands` in `version.go` must list every subcommand `main` dispatches
+on; a test checks it against the usage text.
 
 Version lives in `cmd/engram/version.go` as a `var`, overridden via `-X
 main.version=...` ldflags: goreleaser passes the pushed tag for published
@@ -73,8 +77,17 @@ On first run, the embedding model (`jinaai/jina-embeddings-v2-small-en`) is down
 │   └── jinaai_jina-embeddings-v2-small-en/  # downloaded on first run
 └── db/
     ├── db_meta.json                             # records the active embedding model
-    └── jinaai_jina-embeddings-v2-small-en.db    # bolt file, one per model
+    ├── jinaai_jina-embeddings-v2-small-en.db    # bolt file, one per model
+    ├── engram.sock                              # daemon socket (0600)
+    ├── daemon.lock                              # ownership: held for the daemon's life
+    ├── spawn.lock                               # client-side spawn debounce
+    ├── daemon.pid
+    └── daemon.log
 ```
+
+The daemon's runtime files sit in the database directory rather than a global
+location, so a config with a different `db.path` gets its own daemon instead of
+contending for one socket.
 
 The bolt file holds two buckets: `memories` (JSON records) and `vectors`
 (binary float32 blobs, one per content chunk). One file per model is what lets
@@ -84,15 +97,73 @@ The bolt file holds two buckets: `memories` (JSON records) and `vectors`
 
 ```
 cmd/engram/          # binary entry point
-  main.go            # wires config → store → server
+  main.go            # no args: config → daemon.Proxy (a byte pipe)
+  daemon.go          # `daemon`, `daemon stop`, `daemon status`
 
 internal/config/     # Config struct + Load/Default
+internal/daemon/     # socket paths, client dial/spawn, daemon serve loop
 internal/store/      # Store interface, boltStore, BM25 index, hugot embedding
 internal/server/     # App + MCP handlers + RegisterTools
+internal/mcptest/    # minimal MCP client, used only by tests
 ```
+
+### Why there is a daemon
+
+bbolt locks its file exclusively for the lifetime of a process, and `boltStore`
+serves every read from in-memory maps loaded once at open. So one process per
+MCP session could neither share the database nor see another session's writes:
+a second session died with `another engram process still has it open`.
+
+Rather than invent a cross-process locking protocol, one process keeps owning
+the database exactly as before and the others became clients of it. Everything
+that makes the store correct — the `sync.RWMutex`, one bolt transaction per
+logical operation — still runs in a single process, so none of it had to be
+re-argued. The daemon also loads the embedding model once instead of per
+session.
+
+- **The client is a byte pipe.** `daemon.Proxy` copies bytes both ways and
+  parses nothing. The wire is newline-delimited JSON-RPC in both directions, so
+  there is no second protocol to version or keep in step with the tools.
+- **The daemon drives `MCPServer.HandleMessage` itself** (`session.go`) rather
+  than mcp-go's `StdioServer.Listen`. `Listen` registers a package-level
+  singleton session with the fixed id `stdio`, so a second concurrent
+  connection fails to register and the two fight over one writer. Each
+  connection gets its own `socketSession` instead.
+- **Two locks, deliberately.** `daemon.lock` is ownership, held for the
+  daemon's whole life, and is what guarantees a single owner. `spawn.lock` only
+  debounces a burst of clients each starting a daemon. They must stay separate
+  files: a client holds the spawn lock while the daemon it just started is
+  booting, and if they were one lock that daemon would find its own parent
+  holding it and exit immediately.
+- **`stop` waits for the ownership lock, not just the socket.** A closed
+  listener does not mean the process is gone, and every caller of `stop` starts
+  a replacement right afterwards.
+- **Shutdown closes live connections.** Closing the listener does not unblock a
+  session already reading from its client, so `accept` cancels the
+  per-connection context before waiting, or a `daemon stop` would hang until
+  every session happened to leave.
+- **Idle shutdown** after `DefaultIdleTimeout` with nothing attached. An idle
+  session still holds its connection, so this only fires once every session is
+  gone.
+- **Version skew:** the daemon writes `engram-daemon <version>` before the MCP
+  stream, and a client that reads a different version retires the daemon and
+  starts its own. Without it a `brew upgrade` would keep serving old code until
+  the machine rebooted.
+
+CLI commands that need the bolt file (`export`, `import`, `reembed`) call
+`daemon.StopIfRunning` and then open it directly. That is only reasonable
+because spawning is automatic, and it is what keeps them simple
+direct-to-bolt commands instead of needing a quiesce protocol or a set of MCP
+tools that would also put `reembed` in front of the model.
 
 - **`Store` interface** (`internal/store/store.go`) — all persistence behind one interface, fully mockable
 - **`boltStore`** (`internal/store/bolt.go`) — production store. Each logical operation lands in one bolt transaction, so the bidirectional-link invariant holds by construction. In-memory maps serve reads and are updated only after a commit succeeds, so a failed write can't desync them.
+  - `Add` and `Update` each build every change — the record, its tags and text, and the peer records a link patch moves — and issue **one** `commit`. Both used to take two transactions (the record, then `syncLinks`), which let another session observe one without the other, and left `Add` creating an unlinked record when a linked id turned out not to exist. `syncLinksLocked` returns changes rather than committing them, and takes the target by value so `Add` can link a record that is not in `s.docs` yet.
+  - Consequently a failed `store` creates nothing, and `Add` returns an empty id on error. The handler used to surface the id of the half-created memory; there is no longer one to surface.
+  - Link validation collects **every** missing id into a `MissingLinksError` rather than failing on the first, so one corrected retry can fix them all instead of one per attempt.
+  - `writeFailure` (`internal/server/handlers.go`) is what the caller reads, and the caller is a language model. It states outright that nothing was written, which is only safe to claim because every `Store` write is atomic (the interface doc says so). Without it a model cannot tell a rejected call from a half-applied one and has to guess whether retrying is safe.
+  - Embedding covers title and content together and has to run outside the lock, so `tryUpdate` re-checks under the lock that the text it embedded from is still current, and retries if not. Otherwise a content-only patch writes back the title as it looked before a concurrent title change.
+  - `Retrieve` assembles a record and its linked summaries under one `RLock`. The handler used to walk the links with a `GetByID` each, which a concurrent write could land between.
 - **`bm25Index`** (`internal/store/bm25.go`) — lexical index over title/tags/content, rebuilt at open and never persisted. Also holds the RRF fusion and the relative-cutoff helpers.
 - **`App`** + **handlers** (`internal/server/`) — one method per MCP tool, uses `BindArguments` for typed arg parsing
 - **`RegisterTools`** (`internal/server/tools.go`) — declarative tool schema registration
@@ -107,6 +178,11 @@ internal/server/     # App + MCP handlers + RegisterTools
 | `retrieve` | memory_id | — |
 | `delete` | memory_id | — |
 | `update` | memory_id, plus at least one of: title, content, tags, add_tags, remove_tags, linked_ids, add_linked_ids, remove_linked_ids | — |
+
+Every tool is served by the shared daemon, so two sessions calling them at the
+same time is the normal case rather than an edge one. Requests from a single
+client are handled in order; different clients run concurrently, and the
+store's read lock lets their searches overlap.
 
 `search` is hybrid: dense vector similarity and lexical BM25 fused by Reciprocal Rank Fusion, with titles and tags weighted above body text. Results are ranked and cut off relative to the best match, so there is no similarity threshold to configure. Omitting both `query` and `tag_filter` lists every memory instead, newest first, with no relevance filtering — the way to enumerate the store (audits, dedup checks, verifying a bulk operation touched everything).
 

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -70,7 +72,7 @@ type RetrieveResult struct {
 // "clear all tags." A tag in both AddTags and RemoveTags ends up removed.
 //
 // LinkedIDs/AddLinkedIDs/RemoveLinkedIDs follow the identical pattern for
-// links, resolved by syncLinks under its own lock so the base set they patch
+// links, resolved by syncLinksLocked under the store lock so the base set they patch
 // against can't go stale between being read and being applied.
 type MemoryUpdate struct {
 	Title           *string
@@ -83,7 +85,42 @@ type MemoryUpdate struct {
 	RemoveLinkedIDs []string
 }
 
+// MissingLinksError reports linked IDs that do not name an existing memory.
+// Add and Update both return it, and both reject the whole write when they do.
+//
+// It carries every missing ID rather than only the first one found, so a
+// caller can correct the entire call at once instead of discovering them one
+// rejected retry at a time.
+type MissingLinksError struct {
+	IDs []string
+}
+
+func (e *MissingLinksError) Error() string {
+	// The singular wording is what this error has always said for one ID;
+	// keeping it means the common case reads naturally rather than as a list
+	// of one.
+	noun := "linked memories"
+	if len(e.IDs) == 1 {
+		noun = "linked memory"
+	}
+	return fmt.Sprintf("%s not found: %s", noun, quoteList(e.IDs))
+}
+
+// quoteList renders IDs as a quoted, comma-separated list.
+func quoteList(ids []string) string {
+	quoted := make([]string, len(ids))
+	for i, id := range ids {
+		quoted[i] = strconv.Quote(id)
+	}
+	return strings.Join(quoted, ", ")
+}
+
 // Store is the persistence interface for memories.
+//
+// Every method that writes is all-or-nothing: on error it has changed nothing,
+// including the peer records a link change would have touched. Callers can
+// therefore report a failure as a failure outright, and retry without first
+// checking what landed.
 type Store interface {
 	Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error)
 	// Search returns a page of matches plus total, the number of candidates
@@ -97,6 +134,10 @@ type Store interface {
 	// matches everything.
 	Search(ctx context.Context, query string, tagFilter []string, limit, offset int) (results []SearchResult, total int, err error)
 	GetByID(ctx context.Context, id string) (Memory, error)
+	// Retrieve returns a memory together with a summary of every memory it
+	// links to, read as one consistent snapshot rather than as a sequence of
+	// independent lookups a concurrent write could land between.
+	Retrieve(ctx context.Context, id string) (RetrieveResult, error)
 	Delete(ctx context.Context, id string) error
 	Update(ctx context.Context, id string, patch MemoryUpdate) error
 	// Tags returns every distinct tag currently used across stored memories,
@@ -230,7 +271,7 @@ func applyTagPatch(currentTags []string, patch MemoryUpdate) []string {
 // (if given) replaces the set outright, then AddLinkedIDs unions in, then
 // RemoveLinkedIDs subtracts — so an id listed in both AddLinkedIDs and
 // RemoveLinkedIDs ends up removed. The result may still contain duplicates or
-// a self-reference; syncLinks runs it through normalizeLinks before use.
+// a self-reference; syncLinksLocked runs it through normalizeLinks before use.
 func applyLinkPatch(currentLinkedIDs []string, patch MemoryUpdate) []string {
 	ids := currentLinkedIDs
 	if patch.LinkedIDs != nil {

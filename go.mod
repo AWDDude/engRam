@@ -3,6 +3,7 @@ module github.com/AWDDude/engRam
 go 1.27.1
 
 require (
+	github.com/gofrs/flock v0.13.1
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.8
 	github.com/mark3labs/mcp-go v1.0.0
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/daulet/tokenizers v1.27.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
-	github.com/gofrs/flock v0.13.1 // indirect
 	github.com/gomlx/compute v0.1.11 // indirect
 	github.com/gomlx/compute-onnx v0.1.10 // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect

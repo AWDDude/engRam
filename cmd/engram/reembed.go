@@ -16,6 +16,8 @@ func runReembed() {
 		os.Exit(1)
 	}
 
+	stopDaemonForDirectAccess("reembed", cfg)
+
 	n, err := store.Reembed(context.Background(), cfg, os.Stdout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram reembed: %v\n", err)

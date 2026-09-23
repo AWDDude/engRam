@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
@@ -24,6 +25,25 @@ type App struct {
 // NewApp constructs an App with the given store and default search settings.
 func NewApp(s store.Store, defaultLimit, maxContentChars int) *App {
 	return &App{store: s, defaultLimit: defaultLimit, maxContentChars: maxContentChars}
+}
+
+// writeFailure renders a failed write for the caller.
+//
+// Every Store write is all-or-nothing, so the message says outright that
+// nothing was written. Without that a caller cannot tell a rejected call from
+// a half-applied one, and has to go and look before it dares retry; an
+// agent reading this is exactly the caller that will otherwise guess.
+//
+// outcome names what did not happen, e.g. "No memory was created".
+func writeFailure(label string, err error, outcome string) string {
+	advice := "It is safe to retry."
+	var missing *store.MissingLinksError
+	if errors.As(err, &missing) {
+		// The IDs are already named in err's own message, so point at them
+		// rather than listing them twice.
+		advice = "Correct or remove those linked_ids and retry."
+	}
+	return fmt.Sprintf("%s: %v. %s; nothing was written. %s", label, err, outcome, advice)
 }
 
 // validateContent enforces the required, non-empty, size-capped rule shared by
@@ -114,13 +134,8 @@ func (a *App) handleStoreMemory(ctx context.Context, req mcp.CallToolRequest) (*
 
 	id, err := a.store.Add(ctx, args.Title, args.Content, args.Tags, args.LinkedIDs)
 	if err != nil {
-		if id != "" {
-			// The memory was persisted but linking failed partway through
-			// (see store.Add); surface the id so the caller can still
-			// retrieve/update/delete it instead of losing track of it.
-			return mcp.NewToolResultError(fmt.Sprintf("store error: %v (memory was created with id %q)", err, id)), nil
-		}
-		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+		return mcp.NewToolResultError(writeFailure("store error", err,
+			"No memory was created")), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(`{"id":%q,"status":"stored"}`, id)), nil
 }
@@ -176,39 +191,15 @@ func (a *App) handleRetrieveMemory(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError("memory_id is required"), nil
 	}
 
-	mem, err := a.store.GetByID(ctx, args.MemoryID)
+	// The store assembles the record and its linked summaries under one read
+	// lock. Walking the links from here with a GetByID each would reintroduce
+	// the gaps a concurrent write can land in, which matters now that several
+	// sessions share one store.
+	result, err := a.store.Retrieve(ctx, args.MemoryID)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("retrieve error: %v", err)), nil
 	}
 
-	linked := make([]store.SearchResult, 0, len(mem.LinkedIDs))
-	seen := make(map[string]bool, len(mem.LinkedIDs))
-	for _, linkedID := range mem.LinkedIDs {
-		// Defense-in-depth: a hand-edited/imported DB could contain a
-		// self-reference or a duplicate id, which the normal write path
-		// (normalizeLinks) never produces — skip rather than surface either.
-		if linkedID == mem.ID || seen[linkedID] {
-			continue
-		}
-		seen[linkedID] = true
-		linkedMem, err := a.store.GetByID(ctx, linkedID)
-		if err != nil {
-			// Defense-in-depth: a dangling reference (e.g. hand-edited DB)
-			// shouldn't make retrieve unusable — skip it rather than error.
-			continue
-		}
-		linked = append(linked, store.SearchResult{ID: linkedMem.ID, Title: linkedMem.Title, Tags: linkedMem.Tags, CreatedAt: linkedMem.CreatedAt, UpdatedAt: linkedMem.UpdatedAt})
-	}
-
-	result := store.RetrieveResult{
-		ID:        mem.ID,
-		Title:     mem.Title,
-		Content:   mem.Content,
-		Tags:      mem.Tags,
-		CreatedAt: mem.CreatedAt,
-		UpdatedAt: mem.UpdatedAt,
-		Linked:    linked,
-	}
 	out, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("marshal error: %v", err)), nil
@@ -272,7 +263,8 @@ func (a *App) handleUpdateMemory(ctx context.Context, req mcp.CallToolRequest) (
 		RemoveLinkedIDs: args.RemoveLinkedIDs,
 	}
 	if err := a.store.Update(ctx, args.MemoryID, patch); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("update error: %v", err)), nil
+		return mcp.NewToolResultError(writeFailure("update error", err,
+			"The memory was not modified")), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(`{"id":%q,"status":"updated"}`, args.MemoryID)), nil
 }

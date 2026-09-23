@@ -22,6 +22,7 @@ type mockStore struct {
 	counter   int
 	searchErr error
 	addErr    error
+	updateErr error
 }
 
 func newMockStore() *mockStore {
@@ -40,7 +41,10 @@ func (m *mockStore) Add(_ context.Context, title, content string, tags, linkedID
 		CreatedAt: "2026-01-01T00:00:00Z",
 	}
 	if m.addErr != nil {
-		return id, m.addErr
+		// Mirrors the real store: a failed Add commits nothing, so there is no
+		// id to report back.
+		delete(m.memories, id)
+		return "", m.addErr
 	}
 	return id, nil
 }
@@ -127,6 +131,45 @@ func (m *mockStore) GetByID(_ context.Context, id string) (store.Memory, error) 
 	return mem, nil
 }
 
+// Retrieve mirrors the real store's assembly of a memory plus its linked
+// summaries, including the skips for a self-reference, a duplicate, and an id
+// pointing at nothing, so the handler tests covering those still exercise them
+// now that the assembly lives behind the interface.
+func (m *mockStore) Retrieve(_ context.Context, id string) (store.RetrieveResult, error) {
+	mem, ok := m.memories[id]
+	if !ok {
+		return store.RetrieveResult{}, fmt.Errorf("memory %q not found", id)
+	}
+	linked := make([]store.SearchResult, 0, len(mem.LinkedIDs))
+	seen := make(map[string]bool, len(mem.LinkedIDs))
+	for _, linkedID := range mem.LinkedIDs {
+		if linkedID == id || seen[linkedID] {
+			continue
+		}
+		seen[linkedID] = true
+		peer, ok := m.memories[linkedID]
+		if !ok {
+			continue
+		}
+		linked = append(linked, store.SearchResult{
+			ID:        peer.ID,
+			Title:     peer.Title,
+			Tags:      peer.Tags,
+			CreatedAt: peer.CreatedAt,
+			UpdatedAt: peer.UpdatedAt,
+		})
+	}
+	return store.RetrieveResult{
+		ID:        mem.ID,
+		Title:     mem.Title,
+		Content:   mem.Content,
+		Tags:      mem.Tags,
+		CreatedAt: mem.CreatedAt,
+		UpdatedAt: mem.UpdatedAt,
+		Linked:    linked,
+	}, nil
+}
+
 func (m *mockStore) Delete(_ context.Context, id string) error {
 	if _, ok := m.memories[id]; !ok {
 		return fmt.Errorf("memory %q not found", id)
@@ -139,6 +182,10 @@ func (m *mockStore) Update(_ context.Context, id string, patch store.MemoryUpdat
 	mem, ok := m.memories[id]
 	if !ok {
 		return fmt.Errorf("memory %q not found", id)
+	}
+	if m.updateErr != nil {
+		// Mirrors the real store: a rejected patch leaves the record untouched.
+		return m.updateErr
 	}
 	if patch.Title != nil {
 		mem.Title = *patch.Title
@@ -271,9 +318,100 @@ func TestHandleStoreMemory_WithLinkedIDs(t *testing.T) {
 	}
 }
 
-func TestHandleStoreMemory_PartialFailureSurfacesID(t *testing.T) {
+// A failed write's message is a contract with the caller, which for this
+// server is a language model deciding whether to retry. "It failed" without
+// "and nothing was written" invites it to either re-check or give up on a call
+// that is perfectly safe to repeat, so these assert the wording, not just the
+// error flag.
+
+func TestHandleStoreMemory_ErrorSaysNothingWasCreated(t *testing.T) {
 	ms := newMockStore()
-	ms.addErr = fmt.Errorf("memory created but linking failed: linked memory %q not found", "missing")
+	ms.addErr = &store.MissingLinksError{IDs: []string{"missing-a", "missing-b"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{
+		"title":      "New memory",
+		"content":    "new content",
+		"linked_ids": []any{"missing-a", "missing-b"},
+	})
+
+	result, err := app.handleStoreMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result")
+	}
+	text := resultText(t, result)
+
+	for _, want := range []string{
+		"No memory was created",  // the fact the caller needs to retry safely
+		"nothing was written",    // and that no peer record moved either
+		"missing-a", "missing-b", // every bad id, so one retry can fix them all
+		"linked_ids", // which argument to fix
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error message is missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestHandleUpdateMemory_ErrorSaysTheMemoryWasNotModified(t *testing.T) {
+	ms := newMockStore()
+	id, err := ms.Add(context.Background(), "Existing", "content", nil, nil)
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	ms.updateErr = &store.MissingLinksError{IDs: []string{"missing"}}
+	app := newTestApp(ms)
+
+	req := makeRequest(map[string]any{
+		"memory_id":      id,
+		"add_linked_ids": []any{"missing"},
+	})
+
+	result, err := app.handleUpdateMemory(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result")
+	}
+	text := resultText(t, result)
+
+	for _, want := range []string{"The memory was not modified", "nothing was written", "missing", "linked_ids"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error message is missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestHandleStoreMemory_NonLinkErrorStillSaysNothingWasWritten(t *testing.T) {
+	// The all-or-nothing statement holds for every failure, not just link
+	// validation: an embedding failure leaves nothing behind either.
+	ms := newMockStore()
+	ms.addErr = fmt.Errorf("embedding chunk 0: backend unavailable")
+	app := newTestApp(ms)
+
+	result, err := app.handleStoreMemory(context.Background(), makeRequest(map[string]any{
+		"title":   "New memory",
+		"content": "new content",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "No memory was created") || !strings.Contains(text, "safe to retry") {
+		t.Errorf("a non-link failure should still say nothing was written: %s", text)
+	}
+	if strings.Contains(text, "linked_ids") {
+		t.Errorf("a failure unrelated to links should not blame linked_ids: %s", text)
+	}
+}
+
+func TestHandleStoreMemory_FailedStoreCreatesNothing(t *testing.T) {
+	ms := newMockStore()
+	ms.addErr = fmt.Errorf("linked memory %q not found", "missing")
 	app := newTestApp(ms)
 
 	req := makeRequest(map[string]any{
@@ -289,9 +427,19 @@ func TestHandleStoreMemory_PartialFailureSurfacesID(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected an error result")
 	}
+
 	text := resultText(t, result)
-	if !strings.Contains(text, "test-id-1") {
-		t.Errorf("expected the partially-created memory's id to be surfaced in the error so the caller can address it, got: %s", text)
+	if !strings.Contains(text, "not found") {
+		t.Errorf("error should explain what went wrong, got: %s", text)
+	}
+	// Add commits the record and its links together, so a rejected link leaves
+	// nothing behind. Reporting an id here would send the caller looking for a
+	// memory that does not exist.
+	if strings.Contains(text, "test-id-") {
+		t.Errorf("error names a memory id, but a failed store creates none: %s", text)
+	}
+	if len(ms.memories) != 0 {
+		t.Errorf("store holds %d memories after a failed add, want none", len(ms.memories))
 	}
 }
 
