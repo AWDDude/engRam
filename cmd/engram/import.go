@@ -26,6 +26,8 @@ func runImport() {
 		os.Exit(1)
 	}
 
+	stopDaemonForDirectAccess("import", cfg)
+
 	f, err := os.Open(*file)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram import: %v\n", err)

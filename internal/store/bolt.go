@@ -261,34 +261,54 @@ func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
+// Add stores a new memory and its links in one transaction, so a bad linked ID
+// rejects the whole write rather than leaving an unlinked record behind. This
+// matches Update, which has always rejected the whole patch on an unknown link.
 func (s *boltStore) Add(ctx context.Context, title, content string, tags, linkedIDs []string) (string, error) {
-	id := uuid.NewString()
-	now := nowRFC3339()
-	if err := s.addMemory(ctx, id, title, content, normalizeTags(tags), nil, now, now); err != nil {
+	// Embedding is slow and needs no lock, and it can fail; run it before
+	// anything is persisted.
+	vectors, err := s.embedChunks(ctx, title, content)
+	if err != nil {
 		return "", err
 	}
-	if len(linkedIDs) > 0 {
-		if _, err := s.syncLinks(id, MemoryUpdate{LinkedIDs: &linkedIDs}); err != nil {
-			// The memory itself was already persisted above; only the link
-			// side failed (e.g. an invalid linked ID). Return the ID so the
-			// caller isn't left with an orphaned record they can't address.
-			return id, fmt.Errorf("memory created but linking failed: %w", err)
-		}
+
+	now := nowRFC3339()
+	mem := Memory{
+		ID:        uuid.NewString(),
+		Title:     title,
+		Content:   content,
+		Tags:      normalizeTags(tags),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
-	return id, nil
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The new record is not in s.docs yet, so its links are resolved against
+	// the value rather than a lookup. Validation still runs against the store,
+	// so a link to something that does not exist fails here, before any write.
+	changes, mem, err := s.syncLinksLocked(mem, MemoryUpdate{LinkedIDs: &linkedIDs}, now)
+	if err != nil {
+		return "", err
+	}
+	if err := s.commit(append(changes, change{mem: mem, vectors: vectors})); err != nil {
+		return "", err
+	}
+	return mem.ID, nil
 }
 
-// addMemory stores a memory and its vectors in one transaction. Used by Add,
-// Update, CSV import, and Reembed.
+// addMemory stores a memory and its vectors in one transaction. It is the raw
+// write path, used only by CSV import and Reembed.
 //
 // The embedded text is "title\n\ncontent" rather than content alone, so
 // semantic search matches against the title as well. Memory.Content stores raw
 // content only; the combined text is embedding input, never surfaced back.
 //
-// linkedIDs is written verbatim with no validation or bidirectional sync —
-// callers that need the link invariant enforced (Add, Update) go through
-// syncLinks separately; CSV import and Reembed intentionally bypass it and
-// restore linkedIDs as-is (see import.go).
+// linkedIDs is written verbatim with no validation or bidirectional sync.
+// Import and Reembed restore data that was already internally consistent and
+// intentionally bypass the invariant (see import.go); Add and Update enforce
+// it through syncLinksLocked instead, in the same transaction as the record.
 func (s *boltStore) addMemory(ctx context.Context, id, title, content string, tags, linkedIDs []string, createdAt, updatedAt string) error {
 	// Embedding is slow and needs no lock; do it before taking one.
 	vectors, err := s.embedChunks(ctx, title, content)
@@ -494,6 +514,55 @@ func (s *boltStore) GetByID(_ context.Context, id string) (Memory, error) {
 	return mem, nil
 }
 
+// Retrieve returns a memory with a summary of each memory it links to, all
+// read under one lock. Assembling it from separate GetByID calls instead would
+// let a write land between them and return a memory alongside a linked set
+// that never existed together — rare with one session, routine once several
+// share the store.
+func (s *boltStore) Retrieve(_ context.Context, id string) (RetrieveResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	mem, ok := s.docs[id]
+	if !ok {
+		return RetrieveResult{}, fmt.Errorf("memory %q not found", id)
+	}
+
+	linked := make([]SearchResult, 0, len(mem.LinkedIDs))
+	seen := make(map[string]bool, len(mem.LinkedIDs))
+	for _, linkedID := range mem.LinkedIDs {
+		// Defense in depth: a hand-edited or imported database could hold a
+		// self-reference, a duplicate, or an id pointing at nothing, none of
+		// which the normal write path produces. Skip each rather than make
+		// the whole record unreadable.
+		if linkedID == id || seen[linkedID] {
+			continue
+		}
+		seen[linkedID] = true
+		peer, ok := s.docs[linkedID]
+		if !ok {
+			continue
+		}
+		linked = append(linked, SearchResult{
+			ID:        peer.ID,
+			Title:     peer.Title,
+			Tags:      normalizeTags(peer.Tags),
+			CreatedAt: peer.CreatedAt,
+			UpdatedAt: peer.UpdatedAt,
+		})
+	}
+
+	return RetrieveResult{
+		ID:        mem.ID,
+		Title:     mem.Title,
+		Content:   mem.Content,
+		Tags:      normalizeTags(mem.Tags),
+		CreatedAt: mem.CreatedAt,
+		UpdatedAt: mem.UpdatedAt,
+		Linked:    linked,
+	}, nil
+}
+
 // Delete removes a memory, its vectors, and every reference to it from other
 // memories' LinkedIDs — all in one transaction, so no dangling reference can
 // survive a partial failure.
@@ -510,6 +579,13 @@ func (s *boltStore) Delete(_ context.Context, id string) error {
 	return s.commit(changes)
 }
 
+// updateRetries bounds how many times Update re-embeds after losing a race.
+// Each retry needs a concurrent write to the same memory to land in the window
+// between reading its text and taking the lock, so more than one is already
+// improbable and the bound only exists to keep a pathological writer from
+// spinning here forever.
+const updateRetries = 3
+
 func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) error {
 	if patch.Tags != nil {
 		normalized := normalizeTags(*patch.Tags)
@@ -517,113 +593,172 @@ func (s *boltStore) Update(ctx context.Context, id string, patch MemoryUpdate) e
 	}
 	patch.AddTags = normalizeTags(patch.AddTags)
 	patch.RemoveTags = normalizeTags(patch.RemoveTags)
+
+	// Embedding covers title and content together, so a patch to either has to
+	// read both, embed outside the lock (it is slow, and it can fail), then
+	// write both back. tryUpdate re-checks under the lock that the text it
+	// embedded from is still current and reports a retry if it isn't:
+	// otherwise a content-only patch would write back whatever the title
+	// looked like before a concurrent title change.
+	for attempt := 0; attempt <= updateRetries; attempt++ {
+		retry, err := s.tryUpdate(ctx, id, patch)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return nil
+		}
+	}
+	return fmt.Errorf("memory %q kept changing under concurrent updates", id)
+}
+
+// tryUpdate makes one attempt at applying patch. It returns retry == true when
+// another writer moved the text out from under the embedding and the whole
+// attempt has to be redone; nothing is mutated in that case.
+//
+// Everything that is persisted lands in a single commit, links included, so
+// another session can never observe a half-applied patch — links updated but
+// content not, or tags written while the peer records that were meant to
+// change with them were not.
+func (s *boltStore) tryUpdate(ctx context.Context, id string, patch MemoryUpdate) (bool, error) {
 	tagsChanged := patch.Tags != nil || len(patch.AddTags) > 0 || len(patch.RemoveTags) > 0
 	linksChanged := patch.LinkedIDs != nil || len(patch.AddLinkedIDs) > 0 || len(patch.RemoveLinkedIDs) > 0
 	needsReembed := patch.Title != nil || patch.Content != nil
 
 	var (
 		title, content string
+		base           Memory
 		vectors        [][]float32
+		err            error
 	)
 	if needsReembed {
-		existing, err := s.GetByID(ctx, id)
+		base, err = s.GetByID(ctx, id)
 		if err != nil {
-			return err
+			return false, err
 		}
-		title, content = existing.Title, existing.Content
+		title, content = base.Title, base.Content
 		if patch.Title != nil {
 			title = *patch.Title
 		}
 		if patch.Content != nil {
 			content = *patch.Content
 		}
-		// Embedding is slow and needs no lock, but it can also fail, so it
-		// runs before anything is persisted: a backend outage then leaves the
-		// record (and its links) exactly as it was, rather than committing
-		// half the patch.
+		// Embedding runs before anything is persisted, so a backend failure
+		// leaves the record and its links exactly as they were.
 		vectors, err = s.embedChunks(ctx, title, content)
 		if err != nil {
-			return err
+			return false, err
 		}
-	}
-
-	// Links, if patched, are handled entirely by syncLinks, which resolves
-	// LinkedIDs/AddLinkedIDs/RemoveLinkedIDs against the current set and
-	// persists atomically. Everything below re-reads the current record under
-	// the lock before writing, so it can't clobber that (or a concurrent link
-	// change from another memory's Update) with a stale snapshot — each branch
-	// overwrites only the fields it actually patched.
-	if linksChanged {
-		if _, err := s.syncLinks(id, patch); err != nil {
-			return err
-		}
-	}
-
-	if !needsReembed && !tagsChanged {
-		if linksChanged {
-			return nil // syncLinks above already persisted the only change.
-		}
-		// Nothing was patched at all; still report a not-found id.
-		_, err := s.GetByID(ctx, id)
-		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	now := nowRFC3339()
 	current, ok := s.docs[id]
 	if !ok {
-		return fmt.Errorf("memory %q not found", id)
+		return false, fmt.Errorf("memory %q not found", id)
 	}
+
+	var changes []change
+	if linksChanged {
+		// syncLinksLocked resolves LinkedIDs/AddLinkedIDs/RemoveLinkedIDs
+		// against the link set as it is now, and returns the peer changes that
+		// keep every link bidirectional without committing them, so they join
+		// this patch's own change in one transaction.
+		changes, current, err = s.syncLinksLocked(current, patch, now)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	if needsReembed && (current.Title != base.Title || current.Content != base.Content) {
+		// The text moved while we were embedding, so both the vectors and the
+		// half of title/content this patch did not set are stale.
+		return true, nil
+	}
+
+	if !needsReembed && !tagsChanged && !linksChanged {
+		// Nothing was patched at all. The lookup above already reported a
+		// missing id, and there is nothing to write — not even a new
+		// UpdatedAt, since no stored field changed.
+		return false, nil
+	}
+
 	if tagsChanged {
 		// Resolved against the record as it is now, not the snapshot read
 		// before embedding: an add/remove patch must not silently drop a tag
 		// another Update committed while this one was embedding.
 		current.Tags = applyTagPatch(current.Tags, patch)
 	}
-	current.UpdatedAt = nowRFC3339()
+	current.UpdatedAt = now
 	if !needsReembed {
-		// vectors omitted: a tags-only change must not re-embed.
-		return s.commit([]change{{mem: current}})
+		// vectors omitted: a tags- or links-only change must not re-embed.
+		return false, s.commit(append(changes, change{mem: current}))
 	}
 	current.Title = title
 	current.Content = content
-	return s.commit([]change{{mem: current, vectors: vectors}})
+	return false, s.commit(append(changes, change{mem: current, vectors: vectors}))
 }
 
-// syncLinks resolves patch's link fields (LinkedIDs replaces the set
-// outright; AddLinkedIDs/RemoveLinkedIDs adjust it incrementally, in the same
-// fixed order as applyTagPatch) against id's current LinkedIDs, normalizes
-// the result (self-reference and duplicates stripped), validates every
-// remaining ID exists, then updates id's LinkedIDs and every peer whose
-// LinkedIDs must change to keep the relationship bidirectional. Returns the
-// normalized link set that was applied.
-//
-// The base set is read, resolved, validated, and mutated all under one lock
-// and landed in one transaction, so a concurrent change to id's own link set
-// can't race the read AddLinkedIDs/RemoveLinkedIDs patch against, a
-// concurrent delete of a link target can't race validation, and a mid-write
-// failure can't leave one side of a link updated without the other. On
-// validation failure nothing is mutated.
+// syncLinks resolves a link patch on its own, for callers with nothing else
+// to land in the same transaction. Returns the normalized link set applied.
 func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	target, ok := s.docs[id]
+	current, ok := s.docs[id]
 	if !ok {
 		return nil, fmt.Errorf("memory %q not found", id)
 	}
+	changes, target, err := s.syncLinksLocked(current, patch, nowRFC3339())
+	if err != nil {
+		return nil, err
+	}
+	if err := s.commit(append(changes, change{mem: target})); err != nil {
+		return nil, err
+	}
+	return target.LinkedIDs, nil
+}
+
+// syncLinksLocked resolves patch's link fields (LinkedIDs replaces the set
+// outright; AddLinkedIDs/RemoveLinkedIDs adjust it incrementally, in the same
+// fixed order as applyTagPatch) against target's current LinkedIDs, normalizes
+// the result (self-reference and duplicates stripped), validates every
+// remaining ID exists, and returns the changes to every peer whose LinkedIDs
+// must move to keep the relationship bidirectional, along with the target
+// record carrying its new link set.
+//
+// target is passed by value rather than looked up by id so that Add can link a
+// record that is not in s.docs yet, and so an existing caller can reuse a
+// lookup it has already done.
+//
+// Nothing is committed here, and the target's own change is returned rather
+// than appended, so a caller patching text or tags at the same time can land
+// all of it in one transaction. Callers must hold s.mu, which is what keeps a
+// concurrent change to the link set from racing the base an incremental patch
+// resolves against, and a concurrent delete from racing validation. On
+// validation failure nothing is mutated.
+func (s *boltStore) syncLinksLocked(target Memory, patch MemoryUpdate, now string) ([]change, Memory, error) {
+	id := target.ID
 
 	normalized := normalizeLinks(id, applyLinkPatch(target.LinkedIDs, patch))
 
+	// Collect every unknown ID before failing. Stopping at the first would
+	// make a caller with several bad links fix them one rejected call at a
+	// time, learning about exactly one per attempt.
+	var missing []string
 	for _, linkID := range normalized {
 		if _, ok := s.docs[linkID]; !ok {
-			return nil, fmt.Errorf("linked memory %q not found", linkID)
+			missing = append(missing, linkID)
 		}
+	}
+	if len(missing) > 0 {
+		return nil, Memory{}, &MissingLinksError{IDs: missing}
 	}
 
 	oldSet := toSet(target.LinkedIDs)
 	newSet := toSet(normalized)
-	now := nowRFC3339()
 
 	var changes []change
 	for _, peerID := range normalized {
@@ -643,12 +778,7 @@ func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
 
 	target.LinkedIDs = normalized
 	target.UpdatedAt = now
-	changes = append(changes, change{mem: target})
-
-	if err := s.commit(changes); err != nil {
-		return nil, err
-	}
-	return normalized, nil
+	return changes, target, nil
 }
 
 // unlinkPeerChanges builds the changes that remove id from each peer's

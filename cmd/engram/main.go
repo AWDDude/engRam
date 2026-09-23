@@ -5,16 +5,16 @@ import (
 	"os"
 	"strings"
 
-	mcpserver "github.com/mark3labs/mcp-go/server"
-
 	"github.com/AWDDude/engRam/internal/config"
-	"github.com/AWDDude/engRam/internal/server"
-	"github.com/AWDDude/engRam/internal/store"
+	"github.com/AWDDude/engRam/internal/daemon"
 )
 
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "daemon":
+			runDaemon()
+			return
 		case "reembed":
 			runReembed()
 			return
@@ -48,23 +48,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	st, cleanup, err := store.NewBoltStore(cfg)
-	if err != nil {
+	// No store and no model is built here any more. bbolt locks its file for
+	// the lifetime of a process and boltStore caches every record in memory,
+	// so one process per MCP session could neither share the database nor see
+	// another session's writes. Instead the daemon owns both, and this process
+	// is a byte pipe carrying MCP frames to it — started on demand, so nothing
+	// has to be installed or supervised for this to work.
+	if err := daemon.Proxy(cfg, version, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "engram: %v\n", err)
-		os.Exit(1)
-	}
-	defer cleanup()
-
-	// RegisterTools below registers a fixed set of tools once at startup and
-	// never changes it afterward; declaring listChanged: false here (instead
-	// of leaving it to mcp-go's implicit listChanged: true default) avoids
-	// misleading clients into subscribing to tool-list-change notifications
-	// that will never come.
-	s := mcpserver.NewMCPServer("engram", version, mcpserver.WithToolCapabilities(false))
-	server.RegisterTools(s, server.NewApp(st, cfg.DefaultLimit, cfg.MaxContentChars))
-
-	if err := mcpserver.ServeStdio(s); err != nil {
-		fmt.Fprintf(os.Stderr, "engram: server error: %v\n", err)
 		os.Exit(1)
 	}
 }

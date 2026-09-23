@@ -7,6 +7,7 @@ A long-term semantic memory MCP server — single statically-linked Go binary wi
 ## Features
 
 - **Single binary** — no Python, no Docker, no runtime dependencies
+- **Many sessions, one store** — a shared daemon starts on demand, so every editor or agent session reads and writes the same memories at once
 - **Local embeddings** via [hugot](https://github.com/knights-analytics/hugot) + GoMLX ([jina-embeddings-v2-small-en](https://huggingface.co/jinaai/jina-embeddings-v2-small-en), 8192-token context, downloaded once on first run)
 - **Single-file storage** via [bbolt](https://github.com/etcd-io/bbolt) — records, vectors, and links in one ACID database
 - **5 MCP tools** — store, search, retrieve, update, delete
@@ -52,6 +53,41 @@ Add to `~/.claude/settings.json`:
 
 If you built from source or installed to a custom path, use the full path to the binary instead.
 
+The same configuration works for any number of clients at once. See
+[The daemon](#the-daemon) for how that works.
+
+## The daemon
+
+Several MCP sessions can use engRam simultaneously. The first one to need the
+database starts a background daemon that owns it; every session after that
+connects to the same daemon, so they all see the same memories immediately,
+and the embedding model is loaded once rather than once per session.
+
+This is automatic. `engram` with no arguments is still the command you point an
+MCP client at; it now connects to the daemon and starts one if none is running.
+Nothing needs installing or supervising, and no port is opened: clients reach
+the daemon over a unix socket beside the database, readable only by you.
+
+```bash
+engram daemon status   # is one running, and which build
+engram daemon stop     # shut it down; the next session starts a fresh one
+engram daemon          # run one in the foreground, to watch what it does
+```
+
+The daemon exits on its own after ten minutes with no sessions attached, so it
+does not hold the model in memory indefinitely. A session that is merely idle
+still counts as attached, so a long pause between tool calls will not drop it.
+
+`export`, `import` and `reembed` need the database to themselves, so they stop
+the daemon before they run. The next session brings a new one up automatically;
+a tool call that happens to arrive mid-`reembed` gets an error rather than
+stale results.
+
+Each database directory gets its own daemon, so a second config with a
+different `db.path` runs alongside the first without interfering. After
+upgrading engRam, the next session notices the running daemon is an older build
+and replaces it, so you do not have to restart anything by hand.
+
 ## Configuration
 
 engRam uses XDG-style directories by default on all platforms:
@@ -60,6 +96,11 @@ engRam uses XDG-style directories by default on all platforms:
 |---------|-------------|
 | Data (db, models) | `~/.local/share/engram/` |
 | Config | `~/.config/engram/config.json` |
+
+The daemon's socket, lock and pid files live in the database directory
+alongside the bolt file, which is what gives each database its own daemon. Its
+log goes to `daemon.log` in the same place; a session that cannot reach a
+daemon quotes the end of that file in its error.
 
 `XDG_DATA_HOME` and `XDG_CONFIG_HOME` are honored on all platforms. Override the config path entirely with `ENGRAM_CONFIG_PATH`.
 
@@ -108,12 +149,15 @@ Re-embedding is atomic — the new model's database is fully built before the ol
 ## CLI
 
 ```bash
-engram                    # start the MCP server on stdio (default, no args)
+engram                    # connect to the shared daemon on stdio (default, no args)
 engram version            # print version, platform and Go toolchain
 engram help               # usage summary
 engram export -f <file>   # write all memories to CSV
 engram import -f <file>   # read memories from CSV
 engram reembed            # re-embed into a newly configured model
+engram daemon             # run the shared daemon in the foreground
+engram daemon status      # report whether a daemon is running
+engram daemon stop        # shut the running daemon down
 ```
 
 `--version`/`-v` and `--help`/`-h` work as aliases. An unrecognised flag exits
@@ -197,6 +241,18 @@ a caller forgot.
 
 `linked_ids` are bidirectional: linking or unlinking a memory updates the
 memory on the other end too, and deleting one cascades the cleanup.
+
+Writes are all-or-nothing. A `store` or `update` naming a `linked_id` that does
+not exist is rejected outright: no memory is created, no existing memory is
+modified, and no memory on the other end of a link is touched. The error lists
+**every** missing ID, not just the first, and says plainly that nothing was
+written, so the call can be corrected and retried without checking what landed:
+
+```
+store error: linked memories not found: "no-such-id", "also-missing".
+No memory was created; nothing was written. Correct or remove those
+linked_ids and retry.
+```
 
 `delete`, `update`, and `retrieve` return an error if `memory_id` does not exist.
 

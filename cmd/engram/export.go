@@ -26,6 +26,8 @@ func runExport() {
 		os.Exit(1)
 	}
 
+	stopDaemonForDirectAccess("export", cfg)
+
 	f, err := os.Create(*file)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "engram export: %v\n", err)
