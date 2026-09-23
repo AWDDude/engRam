@@ -30,6 +30,9 @@ func Dial(cfg config.Config, version string) (*Conn, error) {
 	if err := os.MkdirAll(cfg.DB.Path, 0o700); err != nil {
 		return nil, fmt.Errorf("creating db dir: %w", err)
 	}
+	if err := ensureSocketDir(p); err != nil {
+		return nil, err
+	}
 
 	// Two passes at most: the second exists only to reconnect after retiring a
 	// daemon running a different build.
@@ -89,9 +92,19 @@ func spawn(p Paths) error {
 	}
 	defer func() { _ = lock.Unlock() }()
 
-	// We just failed to dial this socket, so a file still sitting there was
-	// left by a daemon that died without cleaning up. It refuses connections
-	// but would still block bind.
+	// A failed connect is not proof that nobody is there. The daemon binds its
+	// socket before loading the embedding model, so while that model is being
+	// downloaded it accepts into the listen backlog and writes no preamble,
+	// which connect reports as a timeout. Unlinking that socket would strand a
+	// live daemon: it keeps the bolt file and the ownership lock, every
+	// replacement we start finds the lock held and exits, and nothing can be
+	// dialled until its idle timer fires. So leave a socket that still answers
+	// alone and let the caller keep polling; only a file nothing answers on is
+	// the leftover of a daemon that died without cleaning up, which refuses
+	// connections while still blocking bind.
+	if running(p.Socket) {
+		return nil
+	}
 	if err := os.Remove(p.Socket); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing stale socket %s: %w", p.Socket, err)
 	}

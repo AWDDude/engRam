@@ -76,6 +76,14 @@ func Stop(cfg config.Config) (bool, error) {
 func stop(p Paths, timeout time.Duration) error {
 	pid, err := readPID(p.PID)
 	if err != nil {
+		// A daemon unlinks its pid file on the way out, so a missing one with
+		// nothing answering means it has already stopped. Two sessions that
+		// both dial a daemon left over from an upgrade both try to retire it,
+		// and the loser must not fail: it still needs the ownership lock to
+		// come free before it can start a replacement.
+		if errors.Is(err, os.ErrNotExist) && !running(p.Socket) {
+			return waitForLockFree(p, timeout)
+		}
 		return err
 	}
 	proc, err := os.FindProcess(pid)
@@ -99,11 +107,13 @@ func stop(p Paths, timeout time.Duration) error {
 		time.Sleep(pollInterval)
 	}
 
-	// Nothing is listening. Clear the socket file in case the daemon was
-	// killed before it could, so the next bind is clean.
-	if err := os.Remove(p.Socket); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing socket %s: %w", p.Socket, err)
-	}
+	// A socket file left behind by a daemon that was killed before it could
+	// unlink its own is deliberately not removed here. Every caller of stop
+	// starts a replacement right afterwards, and between the failed dial above
+	// and a removal here that replacement can already have bound the same path
+	// — deleting its socket would leave it owning the database with nothing
+	// able to reach it. listen already clears a stale file, and only once
+	// nothing answers on it, which is the check that makes it safe.
 
 	// A closed listener is not proof the process is gone: it still has to
 	// release the ownership lock on its way out. Returning before that lets

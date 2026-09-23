@@ -33,6 +33,9 @@ func Serve(ctx context.Context, cfg config.Config, version string, newMCP NewMCP
 	if err := os.MkdirAll(cfg.DB.Path, 0o700); err != nil {
 		return fmt.Errorf("creating db dir: %w", err)
 	}
+	if err := ensureSocketDir(p); err != nil {
+		return err
+	}
 
 	lock, held, err := takeLock(p.Lock)
 	if err != nil {
@@ -71,14 +74,50 @@ func Serve(ctx context.Context, cfg config.Config, version string, newMCP NewMCP
 		}
 	}()
 
-	mcpSrv, cleanup, err := newMCP()
+	mcpSrv, cleanup, err := buildMCP(ctx, newMCP)
 	if err != nil {
 		return err
+	}
+	if mcpSrv == nil {
+		// Signalled before the store finished loading. The deferred cleanups
+		// above still release the lock and unlink the socket and pid file; the
+		// abandoned build goes with the process.
+		log.Printf("signalled while loading %s, exiting", cfg.DB.Path)
+		return nil
 	}
 	defer cleanup()
 
 	log.Printf("engram daemon %s serving %s (pid %d)", version, p.Socket, os.Getpid())
 	return accept(ctx, listener, mcpSrv, version, idle)
+}
+
+// buildMCP runs newMCP while keeping ctx observable, returning a nil server and
+// a nil error if ctx is cancelled first.
+//
+// newMCP loads the embedding model, downloading it on a first run, which takes
+// minutes. Calling it inline would leave the daemon deaf to SIGTERM for that
+// whole time: the caller has already installed a signal handler, so the default
+// terminate disposition is suppressed and a `daemon stop` would signal a
+// process that neither dies nor closes its listener, then fail once its own
+// timeout expired — taking `export`, `import` and `reembed` with it.
+func buildMCP(ctx context.Context, newMCP NewMCPFunc) (*mcpserver.MCPServer, func(), error) {
+	type result struct {
+		srv     *mcpserver.MCPServer
+		cleanup func()
+		err     error
+	}
+	// Buffered because nothing reads this once ctx wins the race below.
+	done := make(chan result, 1)
+	go func() {
+		srv, cleanup, err := newMCP()
+		done <- result{srv, cleanup, err}
+	}()
+	select {
+	case r := <-done:
+		return r.srv, r.cleanup, r.err
+	case <-ctx.Done():
+		return nil, nil, nil
+	}
 }
 
 // listen binds the unix socket, clearing a socket file left behind by a daemon
@@ -140,10 +179,22 @@ func accept(ctx context.Context, listener net.Listener, mcpSrv *mcpserver.MCPSer
 			if shutdown.started() {
 				break
 			}
+			// Cancel before waiting, for the same reason the shutdown path
+			// below does: the watchers are what close the live connections, and
+			// without this the daemon would hang here holding the bolt file
+			// instead of reporting the accept failure.
+			cancel()
 			wg.Wait()
 			return fmt.Errorf("accepting on %s: %w", listener.Addr(), err)
 		}
-		tracker.add()
+		if !tracker.add() {
+			// Idle shutdown began between the accept and here. No preamble has
+			// been written, so closing now leaves the client dialling again and
+			// spawning a replacement, rather than holding an MCP session on a
+			// daemon that is already on its way out.
+			conn.Close()
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -201,11 +252,12 @@ func (s *shutdownState) started() bool {
 // connTracker counts attached clients and fires onIdle once the last one
 // leaves and stays gone for the timeout.
 type connTracker struct {
-	mu     sync.Mutex
-	n      int
-	timer  *time.Timer
-	idle   time.Duration
-	onIdle func()
+	mu      sync.Mutex
+	n       int
+	timer   *time.Timer
+	idle    time.Duration
+	stopped bool
+	onIdle  func()
 }
 
 func newConnTracker(idle time.Duration, onIdle func()) *connTracker {
@@ -221,20 +273,46 @@ func (t *connTracker) arm() {
 }
 
 func (t *connTracker) armLocked() {
-	if t.idle <= 0 || t.n > 0 || t.timer != nil {
+	if t.idle <= 0 || t.n > 0 || t.timer != nil || t.stopped {
 		return
 	}
-	t.timer = time.AfterFunc(t.idle, t.onIdle)
+	t.timer = time.AfterFunc(t.idle, t.fire)
 }
 
-func (t *connTracker) add() {
+// fire runs onIdle unless a client attached while the timer was going off.
+// time.Timer.Stop reports false once the callback has started, so add cannot
+// cancel this on its own and the count has to be re-checked here.
+//
+// onIdle runs under the lock deliberately: it closes the listener, and holding
+// the lock across it is what makes add's stopped check decisive, so a client
+// accepted in the same instant is turned away rather than handed a session on a
+// daemon that is leaving.
+func (t *connTracker) fire() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.timer = nil
+	if t.n > 0 {
+		return
+	}
+	t.stopped = true
+	t.onIdle()
+}
+
+// add registers a newly accepted connection, reporting false if idle shutdown
+// has already begun. The caller must then drop the connection instead of
+// serving it.
+func (t *connTracker) add() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return false
+	}
 	t.n++
 	if t.timer != nil {
 		t.timer.Stop()
 		t.timer = nil
 	}
+	return true
 }
 
 func (t *connTracker) done() {

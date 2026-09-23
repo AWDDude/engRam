@@ -701,26 +701,6 @@ func (s *boltStore) tryUpdate(ctx context.Context, id string, patch MemoryUpdate
 	return false, s.commit(append(changes, change{mem: current, vectors: vectors}))
 }
 
-// syncLinks resolves a link patch on its own, for callers with nothing else
-// to land in the same transaction. Returns the normalized link set applied.
-func (s *boltStore) syncLinks(id string, patch MemoryUpdate) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	current, ok := s.docs[id]
-	if !ok {
-		return nil, fmt.Errorf("memory %q not found", id)
-	}
-	changes, target, err := s.syncLinksLocked(current, patch, nowRFC3339())
-	if err != nil {
-		return nil, err
-	}
-	if err := s.commit(append(changes, change{mem: target})); err != nil {
-		return nil, err
-	}
-	return target.LinkedIDs, nil
-}
-
 // syncLinksLocked resolves patch's link fields (LinkedIDs replaces the set
 // outright; AddLinkedIDs/RemoveLinkedIDs adjust it incrementally, in the same
 // fixed order as applyTagPatch) against target's current LinkedIDs, normalizes
@@ -783,8 +763,8 @@ func (s *boltStore) syncLinksLocked(target Memory, patch MemoryUpdate, now strin
 
 // unlinkPeerChanges builds the changes that remove id from each peer's
 // LinkedIDs, skipping any peer present in keep (nil keep skips none), and
-// stamps each changed peer's UpdatedAt with now. Shared by syncLinks (which
-// keeps peers still in the new link set) and Delete (which keeps none).
+// stamps each changed peer's UpdatedAt with now. Shared by syncLinksLocked
+// (which keeps peers still in the new link set) and Delete (which keeps none).
 // Callers must hold s.mu.
 func (s *boltStore) unlinkPeerChanges(id string, peerIDs []string, keep map[string]bool, now string) []change {
 	var changes []change

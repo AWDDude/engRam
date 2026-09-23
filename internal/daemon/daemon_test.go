@@ -452,6 +452,145 @@ func TestSpawnLock_IsNotTheDaemonsOwnershipLock(t *testing.T) {
 	}
 }
 
+func TestEnsureSocketDir_RefusesADirectoryOthersCanWrite(t *testing.T) {
+	deep := filepath.Join(t.TempDir(), strings.Repeat("a-fairly-long-directory-name/", 10))
+	p := PathsFor(config.Config{DB: config.DBConfig{Path: deep}})
+	if p.PrivateSocketDir == "" {
+		t.Fatal("the length fallback left the socket in shared temp space")
+	}
+	if err := ensureSocketDir(p); err != nil {
+		t.Fatalf("ensureSocketDir: %v", err)
+	}
+	info, err := os.Stat(p.PrivateSocketDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("created the fallback directory as %#o, want 0700", perm)
+	}
+
+	// The socket is the daemon's entire access control story: anything that can
+	// connect reads and writes every memory. A directory in shared temp space
+	// that another local user can write to is one where they can bind this
+	// predictable path first and answer with a forged preamble.
+	if err := os.Chmod(p.PrivateSocketDir, 0o777); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(p.PrivateSocketDir, 0o700)
+	if err := ensureSocketDir(p); err == nil {
+		t.Error("accepted a world-writable fallback socket directory")
+	}
+}
+
+func TestSpawn_LeavesASocketThatStillAnswersAlone(t *testing.T) {
+	cfg := testConfig(t)
+	p := PathsFor(cfg)
+
+	// A daemon binds before it builds its store, so while the embedding model
+	// downloads it accepts into the backlog and writes no preamble — which
+	// connect reports as a timeout, exactly like a dead socket. Treating that as
+	// stale would unlink a daemon that holds the database and the ownership
+	// lock, leaving every replacement to exit on the spot and nothing to dial.
+	listener, err := net.Listen("unix", p.Socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	if err := spawn(p); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if !running(p.Socket) {
+		t.Error("spawn unlinked a socket that was still answering")
+	}
+	if _, err := os.Stat(p.Log); !os.IsNotExist(err) {
+		t.Error("spawn started a daemon despite one already being up")
+	}
+}
+
+func TestServe_ShutsDownWhileTheStoreIsStillLoading(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	building := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	newMCP := func() (*mcpserver.MCPServer, func(), error) {
+		close(building)
+		<-release
+		return nil, func() {}, nil
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, cfg, "1.0.0", newMCP, 0) }()
+	<-building
+
+	// Building the store downloads the embedding model on a first run, which
+	// takes minutes, and the daemon's signal handler has already suppressed the
+	// default terminate disposition. If the build is not interruptible, a
+	// `daemon stop` signals a process that neither dies nor closes its listener,
+	// and fails once its own timeout expires — taking export, import and reembed
+	// with it.
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v, want a clean exit", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve stayed blocked building the store after cancellation")
+	}
+
+	p := PathsFor(cfg)
+	for _, path := range []string{p.Socket, p.PID} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s survived the shutdown", path)
+		}
+	}
+}
+
+func TestStop_TreatsAMissingPIDFileAsAlreadyStopped(t *testing.T) {
+	// After an upgrade both sessions can dial the same stale daemon, both see
+	// the version mismatch, and both retire it. The winner's daemon unlinks the
+	// pid file on its way out, so the loser must not fail on a file that is gone
+	// precisely because the work is done — it would give up instead of
+	// connecting to the replacement.
+	if err := stop(PathsFor(testConfig(t)), stopTimeout); err != nil {
+		t.Errorf("stop with no pid file and nothing listening: %v", err)
+	}
+}
+
+func TestConnTracker_TurnsAwayAClientOnceIdleShutdownBegins(t *testing.T) {
+	fired := make(chan struct{})
+	tracker := newConnTracker(10*time.Millisecond, func() { close(fired) })
+	tracker.arm()
+	<-fired
+
+	// Nothing has been written to a connection accepted this late, so the only
+	// safe answer is to drop it: the client retries and spawns a replacement.
+	// Serving it instead would kill the session, since it has already dialled
+	// successfully and will not dial again.
+	if tracker.add() {
+		t.Error("accepted a connection after idle shutdown began")
+	}
+}
+
+func TestConnTracker_DoesNotShutDownOnAClientThatBeatTheTimer(t *testing.T) {
+	// time.Timer.Stop reports false once the callback has started, so add cannot
+	// cancel a timer that is already going off. The callback has to re-check the
+	// count itself, or a client that connects in that instant loses its session.
+	tracker := newConnTracker(time.Hour, func() {
+		t.Error("idle shutdown fired with a client attached")
+	})
+	if !tracker.add() {
+		t.Fatal("add refused the first connection")
+	}
+	tracker.fire()
+	if tracker.stopped {
+		t.Error("the tracker stopped despite an attached client")
+	}
+}
+
 func TestStop_WaitsForTheOwnershipLockToBeReleased(t *testing.T) {
 	cfg := testConfig(t)
 	newMCP, _ := echoMCP("daemon")

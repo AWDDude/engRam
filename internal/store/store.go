@@ -72,7 +72,7 @@ type RetrieveResult struct {
 // "clear all tags." A tag in both AddTags and RemoveTags ends up removed.
 //
 // LinkedIDs/AddLinkedIDs/RemoveLinkedIDs follow the identical pattern for
-// links, resolved by syncLinks under its own lock so the base set they patch
+// links, resolved by syncLinksLocked under the store lock so the base set they patch
 // against can't go stale between being read and being applied.
 type MemoryUpdate struct {
 	Title           *string
@@ -271,7 +271,7 @@ func applyTagPatch(currentTags []string, patch MemoryUpdate) []string {
 // (if given) replaces the set outright, then AddLinkedIDs unions in, then
 // RemoveLinkedIDs subtracts — so an id listed in both AddLinkedIDs and
 // RemoveLinkedIDs ends up removed. The result may still contain duplicates or
-// a self-reference; syncLinks runs it through normalizeLinks before use.
+// a self-reference; syncLinksLocked runs it through normalizeLinks before use.
 func applyLinkPatch(currentLinkedIDs []string, patch MemoryUpdate) []string {
 	ids := currentLinkedIDs
 	if patch.LinkedIDs != nil {
